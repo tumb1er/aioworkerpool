@@ -9,6 +9,9 @@ from logging import getLogger
 
 import sys
 
+from daemon import DaemonContext
+from daemon.pidfile import TimeoutPIDLockFile
+
 
 class WorkerBaseHandler:
     """ Worker process handler."""
@@ -21,10 +24,18 @@ class WorkerBaseHandler:
         self._loop = loop
         self._main_task = None  # type: asyncio.Task
         self._exit_future = asyncio.Future(loop=self._loop)
+        self._running = False
 
     @property
     def id(self) -> int:
         return self._worker_id
+
+    @property
+    def loop(self):
+        return self._loop
+
+    def is_running(self):
+        return self._running
 
     def is_stale(self):
         """ Checks if child process hang up."""
@@ -64,7 +75,9 @@ class WorkerBaseHandler:
 
         self._loop = asyncio.new_event_loop()
         self._loop.add_signal_handler(signal.SIGINT, self._interrupt)
+        self._loop.add_signal_handler(signal.SIGTERM, self._terminate)
         asyncio.set_event_loop(self._loop)
+        self._running = True
         self._main_task = asyncio.Task(self.main(worker_id), loop=self._loop)
         self._loop.run_forever()
 
@@ -84,9 +97,17 @@ class WorkerBaseHandler:
         if self._main_task:
             self.logger.debug("Cancelling main task")
             self._main_task.cancel()
+        self._stop_loop()
+
+    def _stop_loop(self):
         self._loop.call_soon(self._loop.close)
         self._loop.stop()
         self.logger.debug("Stopped loop")
+
+    def _terminate(self):
+        self.logger.debug("Got SIGTERM, terminating")
+        self._running = False
+        self._main_task.add_done_callback(lambda f: self._stop_loop())
 
     def interrupt(self):
         return self.send_and_wait(sig=signal.SIGINT)
@@ -115,7 +136,7 @@ class Supervisor:
     def __init__(self, loop:asyncio.BaseEventLoop=None, workers:int=2,
                  worker_factory: working_factory_type=WorkerBaseHandler,
                  check_interval:float=1.0):
-        self._loop = loop or asyncio.get_event_loop()
+        self._loop = loop
         self._workers = workers
         self._worker_factory = worker_factory
         self._check_interval = check_interval
@@ -136,6 +157,7 @@ class Supervisor:
 
     def start(self):
         self.logger.info("Starting pool")
+        self._loop = self._loop or asyncio.get_event_loop()
         self._running = True
         for cb in self._on_start:
             if asyncio.iscoroutine(cb):
@@ -191,7 +213,7 @@ class Supervisor:
             self._last_check = now
 
     async def _check_pool(self):
-        # check if some worker processes are stale
+        # check if some worker processes are stale or exited
         for worker in list(self._pool.values()):
             if not worker.is_stale():
                 self.logger.debug("worker %s is not stale" % worker.id)
@@ -206,12 +228,28 @@ class Supervisor:
 
         self.logger.debug("%s workers in pool" % len(self._pool))
 
+        if not self._running:
+            return
         for worker_id in set(range(self._workers)) - set(self._pool.keys()):
             worker = self._worker_factory(worker_id, self._loop)
             self._pool[worker_id] = worker
             worker.start()
 
-    def main(self):
+    def main(self, daemonize=False, pidfile='workerpool.pid'):
+        if daemonize:
+            context = self.get_daemon_context(pidfile)
+            with context:
+                self._main()
+        else:
+            self._main()
+
+    def _main(self):
         self.start()
         self._loop.run_forever()
         self._loop.close()
+
+    # noinspection PyMethodMayBeStatic
+    def get_daemon_context(self, pidfile):
+        path = os.path.join(os.getcwd(), pidfile)
+        pidfile = TimeoutPIDLockFile(path)
+        return DaemonContext(pidfile=pidfile, stderr=sys.stderr)
