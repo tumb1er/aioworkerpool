@@ -12,19 +12,27 @@ import sys
 from daemon import DaemonContext
 from daemon.pidfile import TimeoutPIDLockFile
 
+from aioworkerpool.worker import WorkerBase
 
-class WorkerBaseHandler:
+WorkerFactory = typing.Callable[[int, asyncio.AbstractEventLoop], WorkerBase]
+ChildFactory = typing.Callable[
+    [int, asyncio.AbstractEventLoop, WorkerFactory], "ChildHandler"]
+
+
+class ChildHandler:
     """ Worker process handler."""
-    logger = getLogger("aioworkerpool.Worker")
+    logger = getLogger("aioworkerpool.Handler")
 
-    def __init__(self, worker_id: int, loop: asyncio.BaseEventLoop):
-        self._worker_id = worker_id
+    def __init__(self, worker_id: int, loop: asyncio.BaseEventLoop,
+                 worker_factory:  WorkerFactory):
         self._last_alive = 0
         self._child = None  # type: mp.Process
         self._loop = loop
         self._main_task = None  # type: asyncio.Task
         self._exit_future = asyncio.Future(loop=self._loop)
-        self._running = False
+        self._worker_id = worker_id
+        self._worker = None  # type: WorkerBase
+        self._worker_factory = worker_factory
 
     @property
     def id(self) -> int:
@@ -35,15 +43,11 @@ class WorkerBaseHandler:
         return self._loop
 
     def is_running(self):
-        return self._running
+        return self._worker and self._worker.is_running()
 
     def is_stale(self):
         """ Checks if child process hang up."""
         return not self.child_exists() or not self._child.is_alive()
-
-    async def main(self, worker_id):
-        """ Child main loop coroutine."""
-        raise NotImplementedError()
 
     def child_exists(self):
         """  Checks if child process exists."""
@@ -62,13 +66,13 @@ class WorkerBaseHandler:
         watcher.add_child_handler(self._child.pid, self.on_child_exit)
         self.logger.debug("Started child %s" % self._child.pid)
 
-    def on_child_exit(self, pid, returncode, *args):
+    def on_child_exit(self, pid, return_code):
         self.logger.info("Child process %s exited with code %s" % (
-            pid, returncode))
-        self._exit_future.set_result(returncode)
+            pid, return_code))
+        self._exit_future.set_result(return_code)
         self._child = None
 
-    def _main(self, worker_id):
+    def _main(self):
         self.logger.debug("MAIN()")
         self._loop.call_soon(self._loop.close)
         self._loop.stop()
@@ -78,13 +82,17 @@ class WorkerBaseHandler:
         self._loop.add_signal_handler(signal.SIGTERM, self._terminate)
         asyncio.set_event_loop(self._loop)
         self._running = True
-        self._main_task = asyncio.Task(self.main(worker_id), loop=self._loop)
+
+        self._worker = self.init_worker()
+        self._main_task = asyncio.Task(self._worker.main(), loop=self._loop)
         self._loop.run_forever()
 
     def init_child(self):
         ctx = mp.get_context("fork")
-        return ctx.Process(target=self._main, args=(self._worker_id,),
-                           daemon=True)
+        return ctx.Process(target=self._main, daemon=True)
+
+    def init_worker(self):
+        return self._worker_factory(self._worker_id, self._loop, )
 
     def kill(self):
         return self.send_and_wait(sig=signal.SIGKILL)
@@ -106,7 +114,7 @@ class WorkerBaseHandler:
 
     def _terminate(self):
         self.logger.debug("Got SIGTERM, terminating")
-        self._running = False
+        self._worker.stop()
         self._main_task.add_done_callback(lambda f: self._stop_loop())
 
     def interrupt(self):
@@ -119,13 +127,11 @@ class WorkerBaseHandler:
         :param sig: signal to send to child (TERM, INT, KILL)
         :returns: future with exitcode of child process
         """
+        if not self._child:
+            return self._exit_future
         self.logger.debug("Sending signal %s to %s" % (sig, self._child.pid))
         os.kill(self._child.pid, sig)
         return self._exit_future
-
-
-working_factory_type = typing.Callable[
-    [int, asyncio.BaseEventLoop], WorkerBaseHandler]
 
 
 class Supervisor:
@@ -133,18 +139,20 @@ class Supervisor:
 
     logger = getLogger('aioworkerpool.Supervisor')
 
-    def __init__(self, loop:asyncio.BaseEventLoop=None, workers:int=2,
-                 worker_factory: working_factory_type=WorkerBaseHandler,
-                 check_interval:float=1.0):
+    def __init__(self, worker_factory: WorkerFactory,
+                 loop: asyncio.BaseEventLoop = None, workers: int = 2,
+                 check_interval: float = 1.0,
+                 child_factory: ChildFactory = ChildHandler):
         self._loop = loop
         self._workers = workers
         self._worker_factory = worker_factory
+        self._child_factory = child_factory
         self._check_interval = check_interval
 
         self._check_task = None  # type: asyncio.Task
-        self._wait_task = None   # type: asyncio.Task
-        self._pool = dict()      # type: typing.Dict[int, WorkerBaseHandler]
-        self._on_start = []      # type: typing.List[typing.Callable[[], None]]
+        self._wait_task = None  # type: asyncio.Task
+        self._pool = dict()  # type: typing.Dict[int, ChildHandler]
+        self._on_start = []  # type: typing.List[typing.Callable[[], None]]
         self._last_check = 0
         self._running = False
 
@@ -174,7 +182,7 @@ class Supervisor:
         self.logger.info("Got SIGINT, shutting down workers...")
         self.loop.remove_signal_handler(signal.SIGINT)
         task = asyncio.Task(self._stop_workers(signal.SIGINT))
-        task.add_done_callback(self._on_workers_stopped)
+        task.add_done_callback(lambda f: self._on_workers_stopped())
 
     def terminate(self):
         self.logger.info("Got SIGTERM, shutting down workers...")
@@ -182,7 +190,7 @@ class Supervisor:
         task = asyncio.Task(self._stop_workers(signal.SIGTERM))
         task.add_done_callback(self._on_workers_stopped)
 
-    def _on_workers_stopped(self, future):
+    def _on_workers_stopped(self):
         task = asyncio.Task(self._shutdown())
         task.add_done_callback(lambda f: self.loop.stop())
 
@@ -231,7 +239,7 @@ class Supervisor:
         if not self._running:
             return
         for worker_id in set(range(self._workers)) - set(self._pool.keys()):
-            worker = self._worker_factory(worker_id, self._loop)
+            worker = ChildHandler(worker_id, self._loop, self._worker_factory)
             self._pool[worker_id] = worker
             worker.start()
 
