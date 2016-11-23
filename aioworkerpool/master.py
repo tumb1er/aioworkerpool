@@ -1,5 +1,6 @@
 # coding: utf-8
 import asyncio
+import logging
 import os
 import signal
 import sys
@@ -10,6 +11,7 @@ from logging import getLogger
 from daemon import DaemonContext
 from daemon.pidfile import TimeoutPIDLockFile
 
+from aioworkerpool.logging import PickleStreamHandler, PicklePipeReader
 from aioworkerpool.pipes import PipeProxy
 from aioworkerpool.signals import Signal, Callback
 from aioworkerpool.worker import WorkerBase
@@ -34,11 +36,13 @@ class ChildHandler:
         self._worker_id = worker_id
         self._worker = None  # type: WorkerBase
         self._worker_factory = worker_factory
-        self._stdout_pipe = None  # type: PipeProxy
-        self._stderr_pipe = None  # type: PipeProxy
+        self._stdout_pipe = None   # type: PipeProxy
+        self._stderr_pipe = None   # type: PipeProxy
+        self._logging_pipe = None  # type: PipeProxy
         self._stdout = stdout
         self._stderr = stderr
         self._max_fd = 0
+        self.handler = None  # type: PickleStreamHandler
 
     @property
     def id(self) -> int:
@@ -67,6 +71,7 @@ class ChildHandler:
             self._max_fd = f.fileno()
         r_stdout, w_stdout = os.pipe()
         r_stderr, w_stderr = os.pipe()
+        r_logging, w_logging = os.pipe()
 
         self._child_pid = os.fork()
         if not self._child_pid:
@@ -76,12 +81,24 @@ class ChildHandler:
             os.close(r_stderr)
             os.close(w_stdout)
             os.close(w_stderr)
+
+            os.close(r_logging)
+            self.init_worker_logging(w_logging)
             return False
         os.close(w_stdout)
         os.close(w_stderr)
-        self._stdout_pipe = PipeProxy(r_stdout, self._stdout)
-        self._stderr_pipe = PipeProxy(r_stderr, self._stderr)
+        os.close(w_logging)
+        self._stdout_pipe = PipeProxy(r_stdout, self._stdout, loop=self._loop)
+        self._stderr_pipe = PipeProxy(r_stderr, self._stderr, loop=self._loop)
+        self._logging_pipe = PicklePipeReader(r_logging, loop=self._loop)
         return True
+
+    def init_worker_logging(self, logging_pipe):
+        self.handler = PickleStreamHandler(os.fdopen(logging_pipe, 'w'))
+        self.handler.setLevel(logging.DEBUG)
+        self.logger = getLogger('aioworkerpool')
+        self.logger.addHandler(self.handler)
+        self.logger.setLevel(logging.DEBUG)
 
     def start(self):
         self.logger.debug("Starting worker with id=%s" % self._worker_id)
@@ -101,10 +118,12 @@ class ChildHandler:
         await asyncio.gather(
             self._stdout_pipe.connect_fd(),
             self._stderr_pipe.connect_fd(),
+            self._logging_pipe.connect_fd(),
             loop=self._loop)
 
         asyncio.Task(self._stdout_pipe.read_loop())
         asyncio.Task(self._stderr_pipe.read_loop())
+        asyncio.Task(self._logging_pipe.read_loop())
 
         self.logger.debug("Started child %s" % self._child_pid)
 
@@ -138,6 +157,7 @@ class ChildHandler:
         sys.exit(0)
 
     def init_worker(self):
+        logging.root.addHandler(self.handler)
         return self._worker_factory(self._worker_id, self._loop, )
 
     def send_and_wait(self, sig: int = signal.SIGKILL) -> asyncio.Future:
@@ -212,7 +232,7 @@ class Supervisor:
         self.logger.info("Got SIGTERM, shutting down workers...")
         self.loop.remove_signal_handler(signal.SIGTERM)
         task = asyncio.Task(self._stop_workers(signal.SIGTERM))
-        task.add_done_callback(self._on_workers_stopped)
+        task.add_done_callback(lambda f: self._on_workers_stopped())
 
     def _on_workers_stopped(self):
         task = asyncio.Task(self._shutdown())

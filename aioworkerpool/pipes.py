@@ -6,7 +6,7 @@ import os
 class PipeProxy:
     """ Proxies STDOUT/STDERR from child processes to file descriptor."""
 
-    def __init__(self, fd: int, file, loop=None):
+    def __init__(self, fd: int, file=None, loop=None):
         self._loop = loop or asyncio.get_event_loop()
         self._file = file
         self._fd = fd

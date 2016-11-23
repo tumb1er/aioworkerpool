@@ -18,7 +18,7 @@ class WorkerBase(metaclass=ABCMeta):
         self._main_task = None  # type: asyncio.Task
         self._on_start = Signal()
         self._on_shutdown = Signal()
-        self._shutted_down = False
+        self._is_shut_down = False
 
     @property
     def id(self):
@@ -60,11 +60,11 @@ class WorkerBase(metaclass=ABCMeta):
         sys.exit(0)
 
     def _shutdown(self):
-        if self._shutted_down:
+        if self._is_shut_down:
             return
         task = asyncio.Task(self._on_shutdown.send())
         task.add_done_callback(lambda f: self._stop_loop())
-        self._shutted_down = True
+        self._is_shut_down = True
 
     @abstractmethod
     async def main(self):
