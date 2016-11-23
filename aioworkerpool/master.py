@@ -12,6 +12,7 @@ import sys
 from daemon import DaemonContext
 from daemon.pidfile import TimeoutPIDLockFile
 
+from aioworkerpool.signals import Signal, Callback
 from aioworkerpool.worker import WorkerBase
 
 WorkerFactory = typing.Callable[[int, asyncio.AbstractEventLoop], WorkerBase]
@@ -28,7 +29,6 @@ class ChildHandler:
         self._last_alive = 0
         self._child = None  # type: mp.Process
         self._loop = loop
-        self._main_task = None  # type: asyncio.Task
         self._exit_future = asyncio.Future(loop=self._loop)
         self._worker_id = worker_id
         self._worker = None  # type: WorkerBase
@@ -78,13 +78,13 @@ class ChildHandler:
         self._loop.stop()
 
         self._loop = asyncio.new_event_loop()
-        self._loop.add_signal_handler(signal.SIGINT, self._interrupt)
-        self._loop.add_signal_handler(signal.SIGTERM, self._terminate)
         asyncio.set_event_loop(self._loop)
         self._running = True
 
         self._worker = self.init_worker()
-        self._main_task = asyncio.Task(self._worker.main(), loop=self._loop)
+        self._loop.add_signal_handler(signal.SIGINT, self._worker.interrupt)
+        self._loop.add_signal_handler(signal.SIGTERM, self._worker.terminate)
+        self._worker.start()
         self._loop.run_forever()
 
     def init_child(self):
@@ -99,23 +99,6 @@ class ChildHandler:
 
     def terminate(self):
         return self.send_and_wait(sig=signal.SIGTERM)
-
-    def _interrupt(self):
-        self.logger.debug("Got SIGINT, stopping")
-        if self._main_task:
-            self.logger.debug("Cancelling main task")
-            self._main_task.cancel()
-        self._stop_loop()
-
-    def _stop_loop(self):
-        self._loop.call_soon(self._loop.close)
-        self._loop.stop()
-        self.logger.debug("Stopped loop")
-
-    def _terminate(self):
-        self.logger.debug("Got SIGTERM, terminating")
-        self._worker.stop()
-        self._main_task.add_done_callback(lambda f: self._stop_loop())
 
     def interrupt(self):
         return self.send_and_wait(sig=signal.SIGINT)
@@ -150,9 +133,10 @@ class Supervisor:
         self._check_interval = check_interval
 
         self._check_task = None  # type: asyncio.Task
-        self._wait_task = None  # type: asyncio.Task
-        self._pool = dict()  # type: typing.Dict[int, ChildHandler]
-        self._on_start = []  # type: typing.List[typing.Callable[[], None]]
+        self._wait_task = None   # type: asyncio.Task
+        self._pool = dict()      # type: typing.Dict[int, ChildHandler]
+        self._on_start = Signal()
+        self._on_shutdown = Signal()
         self._last_check = 0
         self._running = False
 
@@ -160,18 +144,17 @@ class Supervisor:
     def loop(self):
         return self._loop
 
-    def on_start(self, callback: typing.Callable[[], None]):
-        self._on_start.append(callback)
+    def on_start(self, callback: Callback):
+        self._on_start.connect(callback)
+
+    def on_shutdown(self, callback: Callback):
+        self._on_shutdown.connect(callback)
 
     def start(self):
         self.logger.info("Starting pool")
         self._loop = self._loop or asyncio.get_event_loop()
         self._running = True
-        for cb in self._on_start:
-            if asyncio.iscoroutine(cb):
-                self._loop.run_until_complete(cb())
-            else:
-                cb()
+        self._loop.run_until_complete(self._on_start.send())
         self.loop.add_signal_handler(signal.SIGINT, self.interrupt)
         self.loop.add_signal_handler(signal.SIGTERM, self.terminate)
         self._check_task = asyncio.Task(self._run_forever_loop(),
@@ -198,6 +181,8 @@ class Supervisor:
         self.logger.info("Shutting down")
         self._running = False
         await self._check_task
+        await self._on_shutdown.send()
+        self.logger.info("Bye!")
 
     async def _stop_workers(self, sig):
         futures = []
