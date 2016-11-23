@@ -1,6 +1,6 @@
 # coding: utf-8
 import asyncio
-import typing
+import sys
 from abc import ABCMeta, abstractmethod
 from logging import getLogger
 
@@ -52,8 +52,12 @@ class WorkerBase(metaclass=ABCMeta):
         self._main_task.add_done_callback(lambda f: self._shutdown())
 
     def _stop_loop(self):
-        self._loop.call_soon(self._loop.close)
+        self._loop.call_soon(self._exit)
         self._loop.stop()
+
+    def _exit(self):
+        self._loop.close()
+        sys.exit(0)
 
     def _shutdown(self):
         if self._shutted_down:
@@ -67,5 +71,9 @@ class WorkerBase(metaclass=ABCMeta):
         raise NotImplementedError()
 
     def start(self):
+        self.logger.debug("Start worker...")
         self._loop.run_until_complete(self._on_start.send())
+        self._running = True
         self._main_task = asyncio.Task(self.main(), loop=self._loop)
+        self._main_task.add_done_callback(lambda f: self._shutdown())
+        self.logger.debug("Worker started")
