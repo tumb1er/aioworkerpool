@@ -12,7 +12,7 @@ from daemon import DaemonContext
 from daemon.pidfile import TimeoutPIDLockFile
 
 from aioworkerpool.logging import PickleStreamHandler, PicklePipeReader
-from aioworkerpool.pipes import PipeProxy
+from aioworkerpool.pipes import PipeProxy, KeepAlivePipe
 from aioworkerpool.signals import Signal, Callback
 from aioworkerpool.worker import WorkerBase
 
@@ -27,8 +27,8 @@ class ChildHandler:
 
     def __init__(self, worker_id: int, loop: asyncio.BaseEventLoop,
                  worker_factory:  WorkerFactory, stdout=sys.stdout,
-                 stderr=sys.stderr):
-        self._last_alive = 0
+                 stderr=sys.stderr, worker_timeout=15.0):
+        self._worker_timeout = worker_timeout
         self._child_pid = 0
         self._child_exit_code = None
         self._loop = loop
@@ -36,13 +36,19 @@ class ChildHandler:
         self._worker_id = worker_id
         self._worker = None  # type: WorkerBase
         self._worker_factory = worker_factory
-        self._stdout_pipe = None   # type: PipeProxy
-        self._stderr_pipe = None   # type: PipeProxy
-        self._logging_pipe = None  # type: PipeProxy
+        self._stdout_pipe = None     # type: PipeProxy
+        self._stderr_pipe = None     # type: PipeProxy
+        self._logging_pipe = None    # type: PicklePipeReader
+        self._keepalive_pipe = None  # type: KeepAlivePipe
+        self._logging_task = None    # type: asyncio.Task
+        self._keepalive_task = None  # type: asyncio.Task
+        self._pong_task = None       # type: asyncio.Task
         self._stdout = stdout
         self._stderr = stderr
         self._max_fd = 0
         self.handler = None  # type: PickleStreamHandler
+        self._alive = False
+        self._pong_stream = None
 
     @property
     def id(self) -> int:
@@ -57,7 +63,7 @@ class ChildHandler:
 
     def is_stale(self):
         """ Checks if child process hang up."""
-        return not self.child_exists()
+        return not self.child_exists() or not self._alive
 
     def child_exists(self):
         """  Checks if child process exists."""
@@ -72,6 +78,7 @@ class ChildHandler:
         r_stdout, w_stdout = os.pipe()
         r_stderr, w_stderr = os.pipe()
         r_logging, w_logging = os.pipe()
+        r_keepalive, w_keepalive = os.pipe()
 
         self._child_pid = os.fork()
         if not self._child_pid:
@@ -84,13 +91,19 @@ class ChildHandler:
 
             os.close(r_logging)
             self.init_worker_logging(w_logging)
+
+            os.close(r_keepalive)
+            self._pong_stream = os.fdopen(w_keepalive, 'w')
             return False
         os.close(w_stdout)
         os.close(w_stderr)
         os.close(w_logging)
+        os.close(w_keepalive)
         self._stdout_pipe = PipeProxy(r_stdout, self._stdout, loop=self._loop)
         self._stderr_pipe = PipeProxy(r_stderr, self._stderr, loop=self._loop)
         self._logging_pipe = PicklePipeReader(r_logging, loop=self._loop)
+        self._keepalive_pipe = KeepAlivePipe(r_keepalive, loop=self._loop,
+                                             timeout=self._worker_timeout)
         return True
 
     def init_worker_logging(self, logging_pipe):
@@ -104,6 +117,7 @@ class ChildHandler:
         self.logger.debug("Starting worker with id=%s" % self._worker_id)
         if self.fork():
             self.logger.debug("forked %s" % self._child_pid)
+            self._alive = True
             # add event loop round-trip to ensure that child has started
             asyncio.Task(self._add_child_handler(), loop=self._loop)
         else:
@@ -119,12 +133,14 @@ class ChildHandler:
             self._stdout_pipe.connect_fd(),
             self._stderr_pipe.connect_fd(),
             self._logging_pipe.connect_fd(),
+            self._keepalive_pipe.connect_fd(),
             loop=self._loop)
 
         asyncio.Task(self._stdout_pipe.read_loop())
         asyncio.Task(self._stderr_pipe.read_loop())
-        asyncio.Task(self._logging_pipe.read_loop())
-
+        self._logging_task = asyncio.Task(self._logging_pipe.read_loop())
+        self._keepalive_task = asyncio.Task(self._keepalive_pipe.read_loop())
+        self._keepalive_task.add_done_callback(self._mark_stale)
         self.logger.debug("Started child %s" % self._child_pid)
 
     def on_child_exit(self, pid, return_code):
@@ -132,7 +148,19 @@ class ChildHandler:
             pid, return_code))
         self._child_exit_code = return_code
         self._exit_future.set_result(return_code)
+        self._logging_task.cancel()
+        self._keepalive_task.cancel()
         self._child_pid = None
+
+    def _mark_stale(self, future: asyncio.Future):
+        if future.cancelled():
+            # child exited
+            return
+        if future.result():
+            # clean pipe reader termination
+            return
+        self.logger.warning("Marking %s as stale" % self._child_pid)
+        self._alive = False
 
     def _cleanup_parent_loop(self):
         self.logger.debug("Cleanup parent loop")
@@ -153,6 +181,7 @@ class ChildHandler:
         self._loop.add_signal_handler(signal.SIGINT, self._worker.interrupt)
         self._loop.add_signal_handler(signal.SIGTERM, self._worker.terminate)
         self._worker.start()
+        self._pong_task = asyncio.Task(self._pong_loop(), loop=self._loop)
         self._loop.run_forever()
         sys.exit(0)
 
@@ -172,6 +201,13 @@ class ChildHandler:
         self.logger.debug("Sending signal %s to %s" % (sig, self._child_pid))
         os.kill(self._child_pid, sig)
         return self._exit_future
+
+    async def _pong_loop(self):
+        """ Periodically writes to keep-alive pipe PONG message."""
+        while True:
+            await asyncio.sleep(self._worker_timeout / 2.0, loop=self._loop)
+            self._pong_stream.write('p')
+            self._pong_stream.flush()
 
 
 class Supervisor:
