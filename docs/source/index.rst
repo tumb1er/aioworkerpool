@@ -32,6 +32,7 @@ Getting started
 Example (see `quickstart.py <https://github.com/tumb1er/aioworkerpool/blob/master/examples/quickstart.py>`_)
 
 .. literalinclude:: ../../examples/quickstart.py
+    :language: python
 
 Running examples:
 
@@ -45,7 +46,7 @@ Source code
 
 - Hosted on `GitHub <https://github.com/tumb1er/aioworkerpool>`_.
 - Uses `Travis <https://travis-ci.org>`_ for continuous integration.
-- Documentation on `ReadTheDocs <https://readthedocs.org>`_.
+- Documentation on `ReadTheDocs <http://aioworkerpool.readthedocs.io/en/latest/>`_.
 
 Dependencies
 ------------
