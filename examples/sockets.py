@@ -1,6 +1,7 @@
 # coding: utf-8
 import asyncio
 import logging
+import os
 import socket
 import sys
 
@@ -11,7 +12,7 @@ from aioworkerpool import worker
 
 
 async def pong(request):
-    return web.Response(text='pong')
+    return web.Response(text='pong from %s!\n' % os.getpid())
 
 
 def init_logging():
@@ -43,18 +44,24 @@ class WorkerHandler(worker.WorkerBase):
     def __init__(self, worker_id: int, loop: asyncio.AbstractEventLoop):
         super().__init__(worker_id, loop)
         self.on_start(init_worker_logging)
+        self.server = None
 
-    def main(self):
-        self.logger.debug("MAINSADSD")
-        try:
-            server = self.loop.create_server(app.make_handler(), sock=sock)
-            self.loop.run_until_complete(server)
-            self.loop.run_until_complete(app.startup())
-        except Exception:
-            self.logger.exception(":(")
-        else:
-            self.logger.info("Run forever")
-            self.loop.run_forever()
+    async def main(self):
+        self.logger.debug("WorkerHandler.main()")
+        handler = app.make_handler()
+        self.server = await self.loop.create_server(handler, sock=sock)
+        await app.startup()
+        self.logger.info("Run forever")
+        while self.is_running():
+            await asyncio.sleep(1)
+        self.logger.info("Closing server")
+
+        self.server.close()
+        await self.server.wait_closed()
+        await app.shutdown()
+        await handler.finish_connections(1.0)
+        await app.cleanup()
+
 
 open_socket()
 
