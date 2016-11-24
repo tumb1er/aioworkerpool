@@ -8,7 +8,7 @@ aioworkerpool: async worker pool
 
 Master/Worker pool for `asyncio` (:pep:`3156`).
 
-.. _Github: https://github.com/tumb1er/aioworkerpool
+.. _aioworkerpool: https://github.com/tumb1er/aioworkerpool
 
 Features
 --------
@@ -31,14 +31,14 @@ Getting started
 
 Example (see `quickstart.py <https://github.com/tumb1er/aioworkerpool/blob/master/examples/quickstart.py>`_)
 
-.. literalinclude:: ../../examples/quickstart.py
+.. literalinclude:: ../examples/quickstart.py
     :language: python
 
 Running examples:
 
 .. code-block:: bash
 
-    $ cd aioworkerpool;
+    $ cd aioworkerpool
     $ python -m examples.quickstart
 
 Source code
@@ -54,6 +54,7 @@ Dependencies
 - POSIX operation system
 - Python 3.5+ (basically, `asyncio` and `async/await` syntax)
 - `python-daemon <https://pypi.python.org/pypi/python-daemon>`_
+- `tblib <https://pypi.python.org/pypi/tblib>`_
 
 Current development status
 --------------------------
@@ -64,9 +65,9 @@ Contents
 --------
 
 .. toctree::
-   :maxdepth: 2
+    :maxdepth: 2
 
-
+    logging
 
 Indices and tables
 ------------------

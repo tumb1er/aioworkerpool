@@ -112,6 +112,7 @@ class ChildHandler:
         self.handler = PickleStreamHandler(os.fdopen(logging_pipe, 'w'))
         self.handler.setLevel(logging.DEBUG)
         self.logger = getLogger('aioworkerpool')
+        self.logger.propagate = False
         self.logger.addHandler(self.handler)
         self.logger.setLevel(logging.DEBUG)
 
@@ -126,24 +127,27 @@ class ChildHandler:
             self._cleanup_parent_loop()
 
     async def _add_child_handler(self):
-        self.logger.debug("add_child_handler...")
-        watcher = asyncio.get_child_watcher()
-        """:type : asyncio.unix_events.BaseChildWatcher"""
-        watcher.add_child_handler(self._child_pid, self.on_child_exit)
+        try:
+            self.logger.debug("add_child_handler...")
+            watcher = asyncio.get_child_watcher()
+            """:type : asyncio.unix_events.BaseChildWatcher"""
+            watcher.add_child_handler(self._child_pid, self.on_child_exit)
 
-        await asyncio.gather(
-            self._stdout_pipe.connect_fd(),
-            self._stderr_pipe.connect_fd(),
-            self._logging_pipe.connect_fd(),
-            self._keepalive_pipe.connect_fd(),
-            loop=self._loop)
+            await asyncio.gather(
+                self._stdout_pipe.connect_fd(),
+                self._stderr_pipe.connect_fd(),
+                self._logging_pipe.connect_fd(),
+                self._keepalive_pipe.connect_fd(),
+                loop=self._loop)
 
-        asyncio.Task(self._stdout_pipe.read_loop())
-        asyncio.Task(self._stderr_pipe.read_loop())
-        self._logging_task = asyncio.Task(self._logging_pipe.read_loop())
-        self._keepalive_task = asyncio.Task(self._keepalive_pipe.read_loop())
-        self._keepalive_task.add_done_callback(self._mark_stale)
-        self.logger.debug("Started child %s" % self._child_pid)
+            asyncio.Task(self._stdout_pipe.read_loop())
+            asyncio.Task(self._stderr_pipe.read_loop())
+            self._logging_task = asyncio.Task(self._logging_pipe.read_loop())
+            self._keepalive_task = asyncio.Task(self._keepalive_pipe.read_loop())
+            self._keepalive_task.add_done_callback(self._mark_stale)
+            self.logger.debug("Started child %s" % self._child_pid)
+        except Exception:
+            self.logger.exception("Error while handling child process start")
 
     def on_child_exit(self, pid, return_code):
         self.logger.info("Child process %s exited with code %s" % (
@@ -152,7 +156,7 @@ class ChildHandler:
         self._exit_future.set_result(return_code)
         if self._logging_task:
             self._logging_task.cancel()
-        if self._keepalive_pipe:
+        if self._keepalive_task:
             self._keepalive_task.cancel()
         self._child_pid = None
 
@@ -168,6 +172,9 @@ class ChildHandler:
 
     def _cleanup_parent_loop(self):
         self.logger.debug("Cleanup parent loop")
+        self._loop.remove_signal_handler(signal.SIGINT)
+        self._loop.remove_signal_handler(signal.SIGTERM)
+        self._loop.stop()
         # closing all file descriptors opened before fork() except
         # STDIN, STDOUT, STDERR instead of trying to close only
         # event loop selector descriptor.

@@ -28,6 +28,11 @@ class PipeProxy(BasePipeReader):
     """ Proxies STDOUT/STDERR from child processes to file descriptor."""
 
     def __init__(self, fd: int, file=None, loop:asyncio.AbstractEventLoop=None):
+        """
+        :param fd: pipe file descriptor
+        :param file: file to write to
+        :param loop: asyncio event loop
+        """
         super().__init__(fd, loop=loop)
         self._file = file
 

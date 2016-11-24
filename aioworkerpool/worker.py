@@ -19,6 +19,8 @@ class WorkerBase(metaclass=ABCMeta):
         self._on_start = Signal()
         self._on_shutdown = Signal()
         self._is_shut_down = False
+        # Saving internal logger
+        self.__logger = self.logger
 
     @property
     def id(self):
@@ -41,13 +43,13 @@ class WorkerBase(metaclass=ABCMeta):
         self._running = False
 
     def interrupt(self):
-        self.logger.info("Interrupting...")
+        self.__logger.info("Interrupting...")
         if self._main_task:
             self._main_task.cancel()
         self._shutdown()
 
     def terminate(self):
-        self.logger.info("Terminating...")
+        self.__logger.info("Terminating...")
         self.stop()
         self._main_task.add_done_callback(lambda f: self._shutdown())
 
@@ -71,10 +73,10 @@ class WorkerBase(metaclass=ABCMeta):
         raise NotImplementedError()
 
     def start(self):
-        self.logger.debug("Start worker...")
+        self.__logger.debug("Start worker...")
         self._loop.run_until_complete(self._on_start.send())
         self._running = True
-        self.logger.debug("Worker started")
+        self.__logger.debug("Worker started")
         if asyncio.iscoroutinefunction(self.main):
             self._main_task = asyncio.Task(self.main(), loop=self._loop)
             self._main_task.add_done_callback(lambda f: self._shutdown())
