@@ -1,6 +1,0 @@
--r requires.txt
--r requires-dev.txt
-
-sphinx
-sphinx-autobuild
-sphinx_autodoc_annotation

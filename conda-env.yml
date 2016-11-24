@@ -1,0 +1,9 @@
+name: py35
+dependencies:
+- pip=9.0.1=py35_0
+- python=3.5.2=0
+- pip:
+  - python-daemon
+  - tblib
+  - aiohttp
+  - sphinx_autodoc_annotation
