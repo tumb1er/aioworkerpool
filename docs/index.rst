@@ -67,6 +67,7 @@ Contents
 .. toctree::
     :maxdepth: 2
 
+    master
     logging
 
 Indices and tables

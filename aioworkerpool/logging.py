@@ -9,9 +9,13 @@ from aioworkerpool.pipes import PipeProxy
 
 
 class PickleStreamHandler(logging.StreamHandler):
-    """ Formats message record to pickle and writes it to stream.
+    """
+    Pickle-to-pipe logging handler.
+
+    Formats message record to pickle and writes it to stream.
 
     :cvar instance: instance of PickleStreamHandler, if initialized
+    :param stream: writable file-like object for pickled messages
 
     """
 

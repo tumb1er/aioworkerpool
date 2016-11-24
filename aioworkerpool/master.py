@@ -25,10 +25,19 @@ class ChildHandler:
     """ Worker process handler."""
     logger = getLogger("aioworkerpool.Handler")
 
-    def __init__(self, worker_id: int, loop: asyncio.BaseEventLoop,
+    def __init__(self, worker_id: int, loop: asyncio.AbstractEventLoop,
                  worker_factory:  WorkerFactory, stdout=sys.stdout,
                  stderr=sys.stderr, worker_timeout=15.0,
-                 preserve_fds=()):
+                 preserve_fds: typing.Iterable[int]=()):
+        """
+        :param worker_id: id of created worker
+        :param loop: asyncio event loop instance
+        :param worker_factory: worker factory
+        :param stdout: file-like object to redirect stdout from workers
+        :param stderr: file-like object to redirect stderr from workers
+        :param worker_timeout: worker keep-alive timeout
+        :param preserve_fds: list of file descriptors to preserve on fork()
+        """
         self._preserve_fds = preserve_fds
         self._worker_timeout = worker_timeout
         self._child_pid = 0
@@ -60,20 +69,25 @@ class ChildHandler:
     def loop(self):
         return self._loop
 
-    def is_running(self):
+    def is_running(self) -> bool:
+        """ Returns worker running state."""
         return self._worker and self._worker.is_running()
 
-    def is_stale(self):
+    def is_stale(self) -> bool:
         """ Checks if child process hang up."""
         return not self.child_exists() or not self._alive
 
-    def child_exists(self):
+    def child_exists(self) -> bool:
         """  Checks if child process exists."""
         return self._child_pid and self._child_exit_code is None
 
     def fork(self) -> bool:
-        """ Creates worker process with fork() method,
-        returns: True for parent process and False for child
+        """ Creates worker process with fork() method
+
+        Also initializes pipes between parent and child processes and installs
+        pickling logging handler for child process
+
+        :returns: True for parent process and False for child
         """
         with open('/dev/null', 'r') as f:
             self._max_fd = f.fileno()
@@ -108,15 +122,23 @@ class ChildHandler:
                                              timeout=self._worker_timeout)
         return True
 
-    def init_worker_logging(self, logging_pipe):
+    def init_worker_logging(self, logging_pipe: int):
+        """ Initializes handler for passing logs from internal logger to
+        parent process through pipe.
+
+        :param logging_pipe: number of file descriptor for logging pipe
+        """
         self.handler = PickleStreamHandler(os.fdopen(logging_pipe, 'w'))
         self.handler.setLevel(logging.DEBUG)
         self.logger = getLogger('aioworkerpool')
         self.logger.propagate = False
         self.logger.addHandler(self.handler)
         self.logger.setLevel(logging.DEBUG)
+        # write all log messages to master process
+        logging.root.addHandler(self.handler)
 
     def start(self):
+        """ Starts new child process."""
         self.logger.debug("Starting worker with id=%s" % self._worker_id)
         if self.fork():
             self.logger.debug("forked %s" % self._child_pid)
@@ -125,8 +147,17 @@ class ChildHandler:
             asyncio.Task(self._add_child_handler(), loop=self._loop)
         else:
             self._cleanup_parent_loop()
+            # start worker event loop
+            self._main()
 
     async def _add_child_handler(self):
+        """ Initializes handling of started child process.
+
+        - connect pipes for stdout/stderr, logs and keep-alive
+        - start async read loops on these pipes
+
+        """
+        # noinspection PyBroadException
         try:
             self.logger.debug("add_child_handler...")
             watcher = asyncio.get_child_watcher()
@@ -143,13 +174,21 @@ class ChildHandler:
             asyncio.Task(self._stdout_pipe.read_loop())
             asyncio.Task(self._stderr_pipe.read_loop())
             self._logging_task = asyncio.Task(self._logging_pipe.read_loop())
-            self._keepalive_task = asyncio.Task(self._keepalive_pipe.read_loop())
+            self._keepalive_task = asyncio.Task(
+                self._keepalive_pipe.read_loop())
             self._keepalive_task.add_done_callback(self._mark_stale)
             self.logger.debug("Started child %s" % self._child_pid)
         except Exception:
             self.logger.exception("Error while handling child process start")
 
-    def on_child_exit(self, pid, return_code):
+    def on_child_exit(self, pid: int , return_code: int):
+        """ Handles child process exit.
+
+        Stops logging and keepalive tasks.
+
+        :param pid: pid of exited process
+        :param return_code: exit code of process
+        """
         self.logger.info("Child process %s exited with code %s" % (
             pid, return_code))
         self._child_exit_code = return_code
@@ -161,43 +200,48 @@ class ChildHandler:
         self._child_pid = None
 
     def _mark_stale(self, future: asyncio.Future):
+        """ Marks child process as stale depending of keepalive result."""
         if future.cancelled():
             # child exited
             return
         if future.result():
             # clean pipe reader termination
             return
+        # keep-alive task returned False, marking child as not alive.
         self.logger.warning("Marking %s as stale" % self._child_pid)
         self._alive = False
 
     def _cleanup_parent_loop(self):
+        """ Cleans parent event loop in child process."""
         self.logger.debug("Cleanup parent loop")
+        # remove signal handlers from parent event loop
         self._loop.remove_signal_handler(signal.SIGINT)
         self._loop.remove_signal_handler(signal.SIGTERM)
+        # mark parent loop as stopping
         self._loop.stop()
         # closing all file descriptors opened before fork() except
         # STDIN, STDOUT, STDERR instead of trying to close only
         # event loop selector descriptor.
         for fd in set(range(3, self._max_fd)) - set(self._preserve_fds):
             os.close(fd)
-        self._main()
 
     def _main(self):
+        """ Initializes and starts worker loop."""
         self.logger.debug("MAIN()")
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         self._running = True
-
         self._worker = self.init_worker()
         self._loop.add_signal_handler(signal.SIGINT, self._worker.interrupt)
         self._loop.add_signal_handler(signal.SIGTERM, self._worker.terminate)
         self._pong_task = asyncio.Task(self._pong_loop(), loop=self._loop)
         self._worker.start()  # should call loop.run_forever()
+        # exit child process after loop stop.
         sys.exit(0)
 
     def init_worker(self):
-        logging.root.addHandler(self.handler)
-        return self._worker_factory(self._worker_id, self._loop, )
+        """ Construct worker object with worker factory."""
+        return self._worker_factory(self._worker_id, self._loop)
 
     def send_and_wait(self, sig: int = signal.SIGKILL) -> asyncio.Future:
         """
@@ -224,20 +268,31 @@ class ChildHandler:
 
 
 class Supervisor:
-    """ Worker controller process."""
+    """ Controls worker pool.
+
+    :cvar child_factory: callable that instantiates child process handler
+    """
 
     logger = getLogger('aioworkerpool.Supervisor')
 
+    child_factory = ChildHandler
+
     def __init__(self, worker_factory: WorkerFactory,
-                 loop: asyncio.BaseEventLoop = None, workers: int = 2,
+                 loop: asyncio.AbstractEventLoop = None, workers: int = 2,
                  check_interval: float = 1.0,
-                 child_factory: ChildFactory = ChildHandler,
                  **kwargs):
+        """
+
+        :param worker_factory:
+        :param loop: asyncio event loop instance
+        :param workers: number of child processes to start
+        :param check_interval: periodic pool check interval in seconds
+        :param kwargs: keyword arguments passed
+        """
         self._kwargs = kwargs
         self._loop = loop
         self._workers = workers
         self._worker_factory = worker_factory
-        self._child_factory = child_factory
         self._check_interval = check_interval
 
         self._check_task = None  # type: asyncio.Task
@@ -332,10 +387,17 @@ class Supervisor:
         if not self._running:
             return
         for worker_id in set(range(self._workers)) - set(self._pool.keys()):
-            worker = self._child_factory(
-                worker_id, self._loop, self._worker_factory, **self._kwargs)
-            self._pool[worker_id] = worker
-            worker.start()
+            self.start_worker(worker_id)
+
+    def start_worker(self, worker_id: int):
+        """ Starts a new worker for id.
+
+        :param worker_id: logical id of created worker
+        """
+        worker = self.child_factory(
+            worker_id, self._loop, self._worker_factory, **self._kwargs)
+        self._pool[worker_id] = worker
+        worker.start()
 
     def main(self, daemonize=False, pidfile='aioworkerpool.pid'):
         if daemonize:

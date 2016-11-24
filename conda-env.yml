@@ -7,3 +7,4 @@ dependencies:
   - tblib
   - aiohttp
   - sphinx_autodoc_annotation
+  - sphinxcontrib-asyncio

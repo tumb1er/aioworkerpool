@@ -2,3 +2,4 @@ aiohttp
 sphinx
 sphinx-autobuild
 sphinx_autodoc_annotation
+sphinxcontrib-asyncio
