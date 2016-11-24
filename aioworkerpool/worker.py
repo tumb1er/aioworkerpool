@@ -67,13 +67,18 @@ class WorkerBase(metaclass=ABCMeta):
         self._is_shut_down = True
 
     @abstractmethod
-    async def main(self):
+    def main(self):
         raise NotImplementedError()
 
     def start(self):
         self.logger.debug("Start worker...")
         self._loop.run_until_complete(self._on_start.send())
         self._running = True
-        self._main_task = asyncio.Task(self.main(), loop=self._loop)
-        self._main_task.add_done_callback(lambda f: self._shutdown())
         self.logger.debug("Worker started")
+        if asyncio.iscoroutinefunction(self.main):
+            self._main_task = asyncio.Task(self.main(), loop=self._loop)
+            self._main_task.add_done_callback(lambda f: self._shutdown())
+            self._loop.run_until_complete(self._main_task)
+        else:
+            self.main()
+            self._shutdown()

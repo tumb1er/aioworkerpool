@@ -27,7 +27,9 @@ class ChildHandler:
 
     def __init__(self, worker_id: int, loop: asyncio.BaseEventLoop,
                  worker_factory:  WorkerFactory, stdout=sys.stdout,
-                 stderr=sys.stderr, worker_timeout=15.0):
+                 stderr=sys.stderr, worker_timeout=15.0,
+                 preserve_fds=()):
+        self._preserve_fds = preserve_fds
         self._worker_timeout = worker_timeout
         self._child_pid = 0
         self._child_exit_code = None
@@ -148,8 +150,10 @@ class ChildHandler:
             pid, return_code))
         self._child_exit_code = return_code
         self._exit_future.set_result(return_code)
-        self._logging_task.cancel()
-        self._keepalive_task.cancel()
+        if self._logging_task:
+            self._logging_task.cancel()
+        if self._keepalive_pipe:
+            self._keepalive_task.cancel()
         self._child_pid = None
 
     def _mark_stale(self, future: asyncio.Future):
@@ -167,7 +171,7 @@ class ChildHandler:
         # closing all file descriptors opened before fork() except
         # STDIN, STDOUT, STDERR instead of trying to close only
         # event loop selector descriptor.
-        for fd in range(3, self._max_fd):
+        for fd in set(range(3, self._max_fd)) - set(self._preserve_fds):
             os.close(fd)
         self._main()
 
@@ -180,9 +184,8 @@ class ChildHandler:
         self._worker = self.init_worker()
         self._loop.add_signal_handler(signal.SIGINT, self._worker.interrupt)
         self._loop.add_signal_handler(signal.SIGTERM, self._worker.terminate)
-        self._worker.start()
         self._pong_task = asyncio.Task(self._pong_loop(), loop=self._loop)
-        self._loop.run_forever()
+        self._worker.start()  # should call loop.run_forever()
         sys.exit(0)
 
     def init_worker(self):
@@ -199,7 +202,10 @@ class ChildHandler:
         if not self._child_pid:
             return self._exit_future
         self.logger.debug("Sending signal %s to %s" % (sig, self._child_pid))
-        os.kill(self._child_pid, sig)
+        try:
+            os.kill(self._child_pid, sig)
+        except IOError:
+            pass
         return self._exit_future
 
     async def _pong_loop(self):
@@ -319,8 +325,8 @@ class Supervisor:
         if not self._running:
             return
         for worker_id in set(range(self._workers)) - set(self._pool.keys()):
-            worker = ChildHandler(worker_id, self._loop, self._worker_factory,
-                                  **self._kwargs)
+            worker = self._child_factory(
+                worker_id, self._loop, self._worker_factory, **self._kwargs)
             self._pool[worker_id] = worker
             worker.start()
 

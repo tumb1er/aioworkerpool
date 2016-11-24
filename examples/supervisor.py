@@ -52,6 +52,7 @@ s = master.Supervisor(worker_factory=WorkerHandler,
                       stderr=open('/tmp/stderr.txt', 'w'),
                       stdout=open('/tmp/stdout.txt', 'w'),
                       worker_timeout=3.0)
+
 s.on_start(init_logging)
 s.on_shutdown(sleep)
 s.main(daemonize=False, pidfile='/tmp/main.pid')
