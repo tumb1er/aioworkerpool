@@ -3,7 +3,7 @@ import asyncio
 import functools
 from unittest import TestCase
 
-from aioworkerpool import worker
+from aioworkerpool import master, worker
 
 
 def unittest_with_loop(func):
@@ -47,3 +47,27 @@ class TestWorker(worker.WorkerBase):
 
     async def main(self):
         await asyncio.sleep(0.1, loop=self.loop)
+
+
+class TestSupervisor(master.Supervisor):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.on_start(self.start_cb)
+        self.on_shutdown(self.shutdown_cb)
+        self.start_cb_called = False
+        self.shutdown_cb_called = False
+
+    async def start_cb(self):
+        await asyncio.sleep(0)
+        self.start_cb_called = True
+
+    def shutdown_cb(self):
+        self.shutdown_cb_called = True
+
+    async def _check_pool(self):
+        await super()._check_pool()
+        self._running = False
+
+

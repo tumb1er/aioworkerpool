@@ -290,7 +290,7 @@ class Supervisor:
         :param kwargs: keyword arguments passed
         """
         self._kwargs = kwargs
-        self._loop = loop
+        self._loop = loop or asyncio.get_event_loop()
         self._workers = workers
         self._worker_factory = worker_factory
         self._check_interval = check_interval
@@ -315,10 +315,12 @@ class Supervisor:
         """ Appends a callback to a shutdown callback list."""
         self._on_shutdown.connect(callback)
 
-    def start(self):
-        """ Initializes event loop and prepares infinite pool check loop."""
+    def start(self) -> asyncio.Task:
+        """ Initializes event loop and prepares infinite pool check loop.
+
+        :returns forever loop task
+        """
         self.logger.info("Starting pool")
-        self._loop = self._loop or asyncio.get_event_loop()
         self._running = True
         self._loop.run_until_complete(self._on_start.send())
         self.loop.add_signal_handler(signal.SIGINT, self.interrupt)
@@ -326,37 +328,46 @@ class Supervisor:
         self._check_task = asyncio.Task(self._run_forever_loop(),
                                         loop=self._loop)
         self.logger.info("Pool started")
+        return self._check_task
 
-    def interrupt(self):
+    def stop(self):
+        """ Mart supervisor as stopping."""
+        self._running = False
+
+    def interrupt(self) -> asyncio.Task:
         """ SIGINT signal handler.
 
         Interrupts all workers, cleanups event loop and exits process.
+
+        :returns task for stopping workers
         """
-        self._running = False
+        self.stop()
         self.logger.info("Got SIGINT, shutting down workers...")
-        self.loop.remove_signal_handler(signal.SIGINT)
-        task = asyncio.Task(self._stop_workers(signal.SIGINT))
-        task.add_done_callback(lambda f: self._on_workers_stopped())
+        self._loop.remove_signal_handler(signal.SIGINT)
+        return asyncio.Task(self._shutdown(signal.SIGINT), loop=self._loop)
 
     def terminate(self):
         """ SIGTERM signal handler.
 
         Gracefully stops all workers, cleanups event loop and exits process.
         """
-        self._running = False
+        self.stop()
         self.logger.info("Got SIGTERM, shutting down workers...")
         self.loop.remove_signal_handler(signal.SIGTERM)
-        task = asyncio.Task(self._stop_workers(signal.SIGTERM))
-        task.add_done_callback(lambda f: self._on_workers_stopped())
+        return asyncio.Task(self._shutdown(signal.SIGTERM), loop=self._loop)
 
-    def _on_workers_stopped(self):
-        task = asyncio.Task(self._shutdown())
-        task.add_done_callback(lambda f: self.loop.stop())
+    async def _shutdown(self, sig):
+        """ Shutdowns worker loop.
 
-    async def _shutdown(self):
+        Terminates child processes, waits for main loop exit, runs on_shutdown
+        callbacks and stops event loop.
+        """
+        await self._stop_workers(sig)
+        if self._check_task:
+            await self._check_task
         self.logger.info("Shutting down")
-        await self._check_task
         await self._on_shutdown.send()
+        self.loop.stop()
         self.logger.info("Bye!")
 
     async def _stop_workers(self, sig):
@@ -372,8 +383,8 @@ class Supervisor:
             await self._check_pool()
             now = time.time()
             interval = min(now - self._last_check, self._check_interval)
-            self._wait_task = asyncio.Task(asyncio.sleep(interval),
-                                           loop=self._loop)
+            coro = asyncio.sleep(interval, loop=self._loop)
+            self._wait_task = asyncio.Task(coro, loop=self._loop)
             try:
                 await self._wait_task
             except asyncio.CancelledError:
