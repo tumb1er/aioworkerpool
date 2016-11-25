@@ -131,7 +131,15 @@ html_theme = 'alabaster'
 # documentation.
 #
 html_theme_options = {
-    'code_font_size': '0.8em'
+    'code_font_size': '0.8em',
+    'description': 'Asynchronous Master/Worker pool',
+    'github_user': 'tumb1er',
+    'github_repo': 'aioworkerpool',
+    'github_button': True,
+    'github_type': 'star',
+    'github_banner': True,
+    'travis_button': True,
+    'codecov_button': True,
 }
 
 # Add any paths that contain custom themes here, relative to this directory.
@@ -181,7 +189,11 @@ html_static_path = ['_static']
 
 # Custom sidebar templates, maps document names to template names.
 #
-# html_sidebars = {}
+html_sidebars = {
+    '**': [
+        'about.html', 'navigation.html', 'searchbox.html',
+    ]
+}
 
 # Additional templates that should be rendered to pages, maps page names to
 # template names.
