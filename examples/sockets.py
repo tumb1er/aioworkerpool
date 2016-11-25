@@ -1,76 +1,71 @@
-# coding: utf-8
 import asyncio
-import logging
 import os
 import socket
-import sys
 
 from aiohttp import web
 
-from aioworkerpool import master
-from aioworkerpool import worker
-
-
-async def pong(request):
-    return web.Response(text='pong from %s!\n' % os.getpid())
-
-
-def init_logging():
-    h = logging.StreamHandler(sys.stderr)
-    h.setLevel(logging.DEBUG)
-    h.setFormatter(
-        logging.Formatter(
-            fmt="[%(process)d] %(name)s %(levelname)s: %(message)s"))
-    logging.root.addHandler(h)
-    logging.root.setLevel(logging.DEBUG)
-
-
-def init_worker_logging():
-    print(logging.root.handlers)
-    global app
-    app = web.Application()
-    app.router.add_route('GET', '/', pong)
+from aioworkerpool import master, worker
 
 
 def open_socket():
-    global sock
-    sock = socket.socket()
-    sock.setsockopt(
-        socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
-    sock.bind(('127.0.0.1', 8080))
+    # open socket and prepare it to be handled in worker processes
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+    s.bind(('127.0.0.1', 8080))
+    return s
 
 
 class WorkerHandler(worker.WorkerBase):
-    def __init__(self, worker_id: int, loop: asyncio.AbstractEventLoop):
+    def __init__(self, worker_id, loop):
         super().__init__(worker_id, loop)
-        self.on_start(init_worker_logging)
-        self.server = None
+        # add custom initialization on worker startup
+        self.on_start(self.init_web_app)
+        self.server = self.app = self.handler = None
+
+    async def pong(self, _):
+        # aiohttp view handler
+        return web.Response(text='pong from #%s %s!\n' %
+                                 (self.id, os.getpid()))
+
+    async def init_web_app(self):
+        # initialize aiohttp.web.Application instance with new event
+        # loop only after child process creation
+        self.app = web.Application(loop=self.loop)
+        self.app.router.add_route('GET', '/', self.pong)
+        # make handler for app
+        self.handler = self.app.make_handler()
+        # start async tcp server
+        self.server = await self.loop.create_server(
+            self.handler, sock=sock)
+        # call app startup callbacks
+        await self.app.startup()
+
+    async def shutdown_web_app(self):
+        # close tcp server
+        self.server.close()
+        # wait for closing
+        await self.server.wait_closed()
+        # call app shutdown callbacks
+        await self.app.shutdown()
+        # cleanup connections
+        await self.handler.finish_connections(1.0)
+        # call app cleanup callbacks
+        await self.app.cleanup()
 
     async def main(self):
-        self.logger.debug("WorkerHandler.main()")
-        handler = app.make_handler()
-        self.server = await self.loop.create_server(handler, sock=sock)
-        await app.startup()
-        self.logger.info("Run forever")
+        # aiohttp application is already completely initialized and
+        # receiving requests, so main loop just checks periodically
+        # that worker is still running.
         while self.is_running():
             await asyncio.sleep(1)
-        self.logger.info("Closing server")
-
-        self.server.close()
-        await self.server.wait_closed()
-        await app.shutdown()
-        await handler.finish_connections(1.0)
-        await app.cleanup()
 
 
-open_socket()
+# open socket in master process to share it with workeres
+sock = open_socket()
 
+supervisor = master.Supervisor(
+    worker_factory=WorkerHandler,
+    # add opened socket to preserved file descriptor list
+    preserve_fds=[sock.fileno()])
 
-s = master.Supervisor(worker_factory=WorkerHandler,
-                      stderr=open('/tmp/stderr.txt', 'w'),
-                      stdout=open('/tmp/stdout.txt', 'w'),
-                      worker_timeout=3.0,
-                      preserve_fds=(sock.fileno(),)
-                      )
-s.on_start(init_logging)
-s.main(daemonize=False, pidfile='/tmp/main.pid')
+supervisor.main()

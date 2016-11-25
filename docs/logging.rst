@@ -39,6 +39,8 @@ is starting.
 Example
 -------
 
+(see `logs.py <https://github.com/tumb1er/aioworkerpool/blob/master/examples/logs.py>`_)
+
 .. literalinclude:: ../examples/logs.py
     :language: python
 

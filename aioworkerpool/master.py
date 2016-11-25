@@ -308,12 +308,15 @@ class Supervisor:
         return self._loop
 
     def on_start(self, callback: Callback):
+        """ Appends a callback to a startup callback list."""
         self._on_start.connect(callback)
 
     def on_shutdown(self, callback: Callback):
+        """ Appends a callback to a shutdown callback list."""
         self._on_shutdown.connect(callback)
 
     def start(self):
+        """ Initializes event loop and prepares infinite pool check loop."""
         self.logger.info("Starting pool")
         self._loop = self._loop or asyncio.get_event_loop()
         self._running = True
@@ -325,6 +328,10 @@ class Supervisor:
         self.logger.info("Pool started")
 
     def interrupt(self):
+        """ SIGINT signal handler.
+
+        Interrupts all workers, cleanups event loop and exits process.
+        """
         self._running = False
         self.logger.info("Got SIGINT, shutting down workers...")
         self.loop.remove_signal_handler(signal.SIGINT)
@@ -332,6 +339,10 @@ class Supervisor:
         task.add_done_callback(lambda f: self._on_workers_stopped())
 
     def terminate(self):
+        """ SIGTERM signal handler.
+
+        Gracefully stops all workers, cleanups event loop and exits process.
+        """
         self._running = False
         self.logger.info("Got SIGTERM, shutting down workers...")
         self.loop.remove_signal_handler(signal.SIGTERM)
@@ -400,6 +411,13 @@ class Supervisor:
         worker.start()
 
     def main(self, daemonize=False, pidfile='aioworkerpool.pid'):
+        """ Supervisor entry point.
+
+        Starts and serves worker pool.
+
+        :param daemonize: option to become a unix daemon
+        :param pidfile: path to daemon pid file
+        """
         if daemonize:
             context = self.get_daemon_context(pidfile)
             with context:
@@ -414,6 +432,7 @@ class Supervisor:
 
     # noinspection PyMethodMayBeStatic
     def get_daemon_context(self, pidfile):
+        """ Initializes daemon context."""
         path = os.path.join(os.getcwd(), pidfile)
         pidfile = TimeoutPIDLockFile(path)
-        return DaemonContext(pidfile=pidfile, stderr=sys.stderr)
+        return DaemonContext(pidfile=pidfile)

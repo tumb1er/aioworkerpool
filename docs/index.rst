@@ -68,6 +68,7 @@ Contents
     :maxdepth: 2
 
     master
+    worker
     logging
 
 Indices and tables
