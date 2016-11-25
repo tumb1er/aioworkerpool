@@ -5,6 +5,8 @@ from random import randint
 import asyncio
 from unittest import mock
 
+import time
+
 from aioworkerpool import master
 from tests import base
 
@@ -58,6 +60,7 @@ class SupervisorTestCase(base.TestCaseBase):
         self.assertIn(mock.call(signal.SIGTERM, self.supervisor.terminate),
                       add_sig_mock.call_args_list)
         self.assertTrue(self.supervisor.start_cb_called)
+        self.assertTrue(self.supervisor._running)
 
     def test_stop(self):
         self.supervisor._running = True
@@ -132,4 +135,31 @@ class SupervisorTestCase(base.TestCaseBase):
                                    0.1, loop=self.loop)
         self.assertEqual(stop_mock.call_count, 2)
 
+    @base.unittest_with_loop
+    async def test_stop_workers(self):
+        done_future = asyncio.Future(loop=self.loop)
+        done_future.set_result(None)
 
+        worker = mock.MagicMock()
+        self.supervisor._pool[0] = worker
+        sig = randint(0, 10)
+        with mock.patch.object(worker, 'send_and_wait',
+                               return_value=done_future) as worker_mock:
+            await self.supervisor._stop_workers(sig)
+
+        worker_mock.assert_called_once_with(sig)
+
+    @base.unittest_with_loop
+    async def test_run_forever_loop(self):
+        self.supervisor._running = True
+        done_future = asyncio.Future(loop=self.loop)
+        done_future.set_result(None)
+
+        def check_pool():
+            self.supervisor._running = False
+            return done_future
+        with mock.patch.object(self.supervisor, '_check_pool',
+                               side_effect=check_pool) as check_mock:
+            await self.supervisor._run_forever_loop()
+
+        check_mock.assert_called_once_with()

@@ -181,7 +181,7 @@ class ChildHandler:
         except Exception:
             self.logger.exception("Error while handling child process start")
 
-    def on_child_exit(self, pid: int , return_code: int):
+    def on_child_exit(self, pid: int, return_code: int):
         """ Handles child process exit.
 
         Stops logging and keepalive tasks.
@@ -379,7 +379,7 @@ class Supervisor:
 
     async def _run_forever_loop(self):
         while self._running:
-            self.logger.debug("check pool")
+            self.logger.debug("check pool %s")
             await self._check_pool()
             now = time.time()
             interval = min(now - self._last_check, self._check_interval)
@@ -390,6 +390,10 @@ class Supervisor:
             except asyncio.CancelledError:
                 pass
             self._last_check = now
+
+    def reset_check_interval(self):
+        if self._wait_task:
+            self._wait_task.cancel()
 
     async def _check_pool(self):
         # check if some worker processes are stale or exited
