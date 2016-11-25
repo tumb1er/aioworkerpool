@@ -8,5 +8,9 @@ setup(
     license='Beer license',
     author='Tumbler',
     author_email='zimbler@gmail.com',
-    description='Asynchronous master/worker for asyncio'
+    description='Asynchronous master/worker for asyncio',
+    install_requires=[
+        'python-daemon',
+        'tblib',
+    ]
 )
