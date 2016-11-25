@@ -1,0 +1,11 @@
+language: python
+python:
+  - "3.5"
+# command to install dependencies
+install:
+  - pip install -r requires.txt
+  - pip install codecov
+# command to run tests
+script: python -m coverage run --branch -m unittest tests
+# report coverage
+after_success: codecov
