@@ -1,5 +1,6 @@
 # coding: utf-8
 import signal
+from contextlib import ExitStack
 from random import randint
 
 import asyncio
@@ -163,3 +164,49 @@ class SupervisorTestCase(base.TestCaseBase):
             await self.supervisor._run_forever_loop()
 
         check_mock.assert_called_once_with()
+
+    def test_reset_check_interval(self):
+        self.assertIsNone(self.supervisor._wait_task)
+        self.supervisor.reset_check_interval()
+
+        self.supervisor._wait_task = wait_task_mock = mock.MagicMock()
+        self.supervisor.reset_check_interval()
+        wait_task_mock.cancel.assert_called_once_with()
+
+    @base.unittest_with_loop
+    async def test_sleep_in_forever_loop(self):
+        self.supervisor._running = True
+        done_future = asyncio.Future(loop=self.loop)
+        done_future.set_result(None)
+
+        def check_pool():
+            self.supervisor._running = False
+            return done_future
+
+        sleep_coro = object()
+
+        with ExitStack() as stack:
+
+            check_task = stack.enter_context(
+                mock.patch.object(self.supervisor, '_check_pool',
+                                  side_effect=check_pool))
+            sleep_mock = stack.enter_context(
+                mock.patch('asyncio.sleep', return_value=sleep_coro))
+            task_mock = stack.enter_context(
+                mock.patch('asyncio.Task', return_value=done_future))
+
+            await self.supervisor._run_forever_loop()
+
+        check_task.assert_called_once_with()
+        self.assertTrue(sleep_mock.called)
+        task_mock.assert_called_once_with(sleep_coro, loop=self.loop)
+
+        # Check that in run_forever_loop() asyncio.Task(asyncio.sleep) is
+        # saved in self._wait_task for supervisor
+        self.assertIs(self.supervisor._wait_task, done_future)
+
+    @base.unittest_with_loop
+    async def test_sleep_cancellation(self):
+        self.supervisor._running = True
+        self.loop.call_later(0.1, lambda: self.supervisor._wait_task.cancel())
+        await self.supervisor._run_forever_loop()
