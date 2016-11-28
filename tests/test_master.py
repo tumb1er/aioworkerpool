@@ -496,13 +496,13 @@ class ChildHandlerTestCase(base.TestCaseBase):
         close_calls = [mock.call(fd) for fd in fds[0:4]]
         # also read sides of logging and keepalive pipes are closed
         close_calls.extend([
-            mock.call(fds[4]), # r_logging
-            mock.call(fds[6])  # r_keepalive
+            mock.call(fds[4]),  # r_logging
+            mock.call(fds[6])   # r_keepalive
         ])
 
         self.assertListEqual(close_mock.call_args_list, close_calls)
 
-        logging_mock.assert_called_once_with(fds[5]) # w_logging
+        logging_mock.assert_called_once_with(fds[5])  # w_logging
 
         fdopen_mock.assert_called_once_with(fds[7], 'w')  # w_keepalive
         self.assertIs(self.handler._pong_stream, fd_obj)
@@ -771,7 +771,7 @@ class ChildHandlerTestCase(base.TestCaseBase):
 
     def test_send_and_wait_no_child_process(self):
         sig = randint(1, 10)
-        self.handler._child_pid = pid = randint(10000, 20000)
+        self.handler._child_pid = randint(10000, 20000)
         with mock.patch('os.kill',
                         side_effect=OSError("[Errno 3] No such process")):
             f = self.handler.send_and_wait(sig)
@@ -786,7 +786,7 @@ class ChildHandlerTestCase(base.TestCaseBase):
             stack.enter_context(self.assertRaises(RuntimeError))
             sleep_mock = stack.enter_context(
                 mock.patch('asyncio.sleep',
-                            side_effect=[done_future, RuntimeError("stop")]))
+                           side_effect=[done_future, RuntimeError("stop")]))
             self.handler._pong_stream = pong = mock.MagicMock()
 
             await self.handler._pong_loop()
@@ -797,10 +797,3 @@ class ChildHandlerTestCase(base.TestCaseBase):
 
         pong.write.assert_called_once_with('p')
         pong.flush.assert_called_once_with()
-
-
-
-
-
-
-
