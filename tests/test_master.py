@@ -3,12 +3,17 @@ import asyncio
 import os
 import signal
 from contextlib import ExitStack
-from random import randint
+from random import randint, random
 from unittest import mock
 
+import sys
+
+from aioworkerpool import pipes
+from aioworkerpool.logging import PicklePipeReader
+from aioworkerpool.master import ChildHandler
 from tests import base
 
-__all__ = ['SupervisorTestCase']
+__all__ = ['SupervisorTestCase', 'ChildHandlerTestCase']
 
 
 class SupervisorTestCase(base.TestCaseBase):
@@ -72,7 +77,7 @@ class SupervisorTestCase(base.TestCaseBase):
         with mock.patch.object(self.loop, 'remove_signal_handler') \
                 as remove_sig_mock:  # type: mock.MagicMock
             with mock.patch.object(self.supervisor, '_shutdown',
-                                   return_value=stop_coro)\
+                                   return_value=stop_coro) \
                     as stop_mock:  # type: mock.MagicMock
                 with mock.patch(
                         'asyncio.Task', return_value=stop_task) as task_mock:
@@ -120,9 +125,9 @@ class SupervisorTestCase(base.TestCaseBase):
             self.supervisor._check_task = f
             # checks that _shutdown blocks until self._check_task
             with self.assertRaises(asyncio.TimeoutError):
-                    await asyncio.wait_for(
-                        self.supervisor._shutdown(signal.SIGTERM), 0.1,
-                        loop=self.loop)
+                await asyncio.wait_for(
+                    self.supervisor._shutdown(signal.SIGTERM), 0.1,
+                    loop=self.loop)
 
             f = asyncio.Future(loop=self.loop)
             self.supervisor._check_task = f
@@ -156,6 +161,7 @@ class SupervisorTestCase(base.TestCaseBase):
         def check_pool():
             self.supervisor._running = False
             return done_future
+
         with mock.patch.object(self.supervisor, '_check_pool',
                                side_effect=check_pool) as check_mock:
             await self.supervisor._run_forever_loop()
@@ -183,7 +189,6 @@ class SupervisorTestCase(base.TestCaseBase):
         sleep_coro = object()
 
         with ExitStack() as stack:
-
             check_task = stack.enter_context(
                 mock.patch.object(self.supervisor, '_check_pool',
                                   side_effect=check_pool))
@@ -294,7 +299,7 @@ class SupervisorTestCase(base.TestCaseBase):
         worker = self._init_worker()
         with mock.patch.object(
                 self.supervisor, 'child_factory', return_value=worker) \
-            as cf_mock:  # type: mock.MagicMock
+                as cf_mock:  # type: mock.MagicMock
             self.supervisor.start_worker(worker.id)
 
         cf_mock.assert_called_once_with(worker.id, self.loop,
@@ -321,7 +326,7 @@ class SupervisorTestCase(base.TestCaseBase):
     def test_main(self):
         self.supervisor._loop = loop_mock = mock.MagicMock()
         with mock.patch.object(self.supervisor, 'start') \
-            as start_mock:  # type: mock.MagicMock
+                as start_mock:  # type: mock.MagicMock
             self.supervisor.main()
         start_mock.assert_called_once_with()
         loop_mock.run_forever.assert_called_once_with()
@@ -339,7 +344,7 @@ class SupervisorTestCase(base.TestCaseBase):
                 with mock.patch.object(self.supervisor, '_main') \
                         as start_mock:  # type: mock.MagicMock
                     self.supervisor.main(daemonize=True, pidfile='pid.txt')
-
+        lock_mock.assert_called_once_with(os.path.join(os.getcwd(), 'pid.txt'))
         dm_mock.assert_called_once_with(pidfile=lock_obj)
         ctx_obj.__enter__.assert_called_once_with()
         start_mock.assert_called_once_with()
@@ -354,3 +359,153 @@ class SupervisorTestCase(base.TestCaseBase):
 
         start_mock.assert_called_once_with()
         self.assertFalse(ctx_mock.called)
+
+
+class ChildHandlerTestCase(base.TestCaseBase):
+    def setUp(self):
+        super().setUp()
+        self.fork_patcher = mock.patch('os.fork', side_effect=self.fork)
+        self.fork_mock = self.fork_patcher.start()
+        self.fork_to_child = False
+        self.worker_id = randint(0, 10)
+        self.child_pid = None
+        self.handler = ChildHandler(self.worker_id, self.loop,
+                                    base.TestWorker)
+
+    def tearDown(self):
+        super().tearDown()
+        self.fork_patcher.stop()
+
+    def fork(self):
+        self.child_pid = 0 if self.fork_to_child else randint(10000, 20000)
+        return self.child_pid
+
+    def test_init_handler(self):
+        stdout = object()
+        stderr = object()
+        fd = randint(20, 30)
+        worker_timeout = random()
+        handler = ChildHandler(self.worker_id, self.loop, base.TestWorker,
+                               stdout=stdout, stderr=stderr,
+                               worker_timeout=worker_timeout,
+                               preserve_fds=(fd,))
+        self.assertEqual(handler.id, self.worker_id)
+        self.assertIs(handler.loop, self.loop)
+        self.assertIs(handler._worker_factory, base.TestWorker),
+        self.assertIs(handler._stdout, stdout)
+        self.assertIs(handler._stderr, stderr)
+        self.assertEqual(handler._worker_timeout, worker_timeout)
+        self.assertTupleEqual(handler._preserve_fds, (fd,))
+
+    def test_is_running(self):
+        self.assertFalse(self.handler.is_running())
+        self.handler._worker = mock.MagicMock()
+        self.handler._worker.is_running = lambda: False
+        self.assertFalse(self.handler.is_running())
+        self.handler._worker.is_running = lambda: True
+        self.assertTrue(self.handler.is_running())
+
+    def test_child_exists(self):
+        self.assertFalse(self.handler.child_exists())
+        self.handler._child_pid = randint(10000, 20000)
+        self.handler._child_exit_code = None
+        self.assertTrue(self.handler.child_exists())
+        self.handler._child_exit_code = 0
+        self.assertFalse(self.handler.child_exists())
+
+    def test_is_stale(self):
+        self.handler._alive = True
+        # no child pid
+        self.assertTrue(self.handler.is_stale())
+        self.handler._child_pid = randint(10000, 20000)
+        # child pid exists and alive flag
+        self.assertFalse(self.handler.is_stale())
+        # alive flag is missing
+        self.handler._alive = False
+        self.assertTrue(self.handler.is_stale())
+
+    def test_fork_as_parent(self):
+        self.fork_to_child = False
+        self.handler._stdout = object()
+        self.handler._stderr = object()
+        fds = [object() for _ in range(8)]
+        pipe_pairs = [fds[0: 2], fds[2: 4], fds[4: 6], fds[6: 8]]
+
+        with mock.patch('os.pipe', side_effect=pipe_pairs) as pipe_mock:
+            with mock.patch('os.close') as close_mock:
+                self.assertTrue(self.handler.fork())
+
+        self.assertEqual(self.handler._child_pid, self.child_pid)
+
+        self.assertEqual(pipe_mock.call_count, 4)
+        self.assertEqual(close_mock.call_count, 4)
+        # all "write" ends of fds pairs are closed in parent process
+        close_calls = [mock.call(fd) for fd in fds[1::2]]
+        self.assertListEqual(close_mock.call_args_list, close_calls)
+
+        # read-sides of pipes are connected to corresponding handlers
+        self.assertIsInstance(self.handler._stdout_pipe, pipes.PipeProxy)
+        self.assertIs(self.handler._stdout_pipe._fd, fds[0])
+        self.assertIs(self.handler._stdout_pipe._file, self.handler._stdout)
+        self.assertIs(self.handler._stdout_pipe._loop, self.loop)
+
+        self.assertIsInstance(self.handler._stderr_pipe, pipes.PipeProxy)
+        self.assertIs(self.handler._stderr_pipe._fd, fds[2])
+        self.assertIs(self.handler._stderr_pipe._file, self.handler._stderr)
+        self.assertIs(self.handler._stderr_pipe._loop, self.loop)
+
+        self.assertIsInstance(self.handler._logging_pipe, PicklePipeReader)
+        self.assertIs(self.handler._logging_pipe._fd, fds[4])
+        self.assertIs(self.handler._logging_pipe._loop, self.loop)
+
+        self.assertIsInstance(self.handler._keepalive_pipe, pipes.KeepAlivePipe)
+        self.assertIs(self.handler._keepalive_pipe._fd, fds[6])
+        self.assertIs(self.handler._keepalive_pipe._loop, self.loop)
+        self.assertEqual(self.handler._keepalive_pipe._timeout,
+                         self.handler._worker_timeout)
+
+    def test_fork_as_child(self):
+        self.fork_to_child = True
+        self.handler._stdout = object()
+        self.handler._stderr = object()
+        fds = [object() for _ in range(8)]
+        pipe_pairs = [fds[0: 2], fds[2: 4], fds[4: 6], fds[6: 8]]
+
+        fd_obj = object()
+
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch('os.pipe', side_effect=pipe_pairs))
+            dup_mock = stack.enter_context(mock.patch('os.dup2'))
+            fdopen_mock = stack.enter_context(
+                mock.patch('os.fdopen', return_value=fd_obj))
+            close_mock = stack.enter_context(mock.patch('os.close'))
+            logging_mock = stack.enter_context(mock.patch.object(
+                self.handler, 'init_worker_logging'))
+            self.assertFalse(self.handler.fork())
+
+        self.assertFalse(self.handler._child_pid)
+
+        # stdout/stderr are replaced with write-sides of corresponding pipes
+        dup_calls = [
+            mock.call(fds[1], sys.stdout.fileno()),
+            mock.call(fds[3], sys.stderr.fileno())
+        ]
+        self.assertListEqual(dup_mock.call_args_list, dup_calls)
+
+        # stdout/stderr pipes are completely closed
+        close_calls = [mock.call(fd) for fd in fds[0:4]]
+        # also read sides of logging and keepalive pipes are closed
+        close_calls.extend([
+            mock.call(fds[4]), # r_logging
+            mock.call(fds[6])  # r_keepalive
+        ])
+
+        self.assertListEqual(close_mock.call_args_list, close_calls)
+
+        logging_mock.assert_called_once_with(fds[5]) # w_logging
+
+        fdopen_mock.assert_called_once_with(fds[7], 'w')  # w_keepalive
+        self.assertIs(self.handler._pong_stream, fd_obj)
+
+
+

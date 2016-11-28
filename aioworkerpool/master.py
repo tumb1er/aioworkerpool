@@ -73,13 +73,13 @@ class ChildHandler:
         """ Returns worker running state."""
         return self._worker and self._worker.is_running()
 
-    def is_stale(self) -> bool:
-        """ Checks if child process hang up."""
-        return not self.child_exists() or not self._alive
-
     def child_exists(self) -> bool:
         """  Checks if child process exists."""
         return self._child_pid and self._child_exit_code is None
+
+    def is_stale(self) -> bool:
+        """ Checks if child process hang up."""
+        return not self.child_exists() or not self._alive
 
     def fork(self) -> bool:
         """ Creates worker process with fork() method
@@ -99,10 +99,11 @@ class ChildHandler:
         self._child_pid = os.fork()
         if not self._child_pid:
             os.dup2(w_stdout, sys.stdout.fileno())
-            os.dup2(w_stderr, sys.stderr.fileno())
             os.close(r_stdout)
-            os.close(r_stderr)
             os.close(w_stdout)
+
+            os.dup2(w_stderr, sys.stderr.fileno())
+            os.close(r_stderr)
             os.close(w_stderr)
 
             os.close(r_logging)
