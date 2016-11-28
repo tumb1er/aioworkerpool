@@ -55,9 +55,9 @@ class PicklePipeReader(PipeProxy):
         Reads, decodes and re-emits log records in infinite loop.
         """
         terminator = PickleStreamHandler.terminator.encode('ascii')
-        while not self._reader.at_eof():
+        while not self.reader.at_eof():
             try:
-                data = await self._reader.readuntil(terminator)
+                data = await self.reader.readuntil(terminator)
             except asyncio.streams.IncompleteReadError:
                 break
             record = pickle.loads(b64decode(data))

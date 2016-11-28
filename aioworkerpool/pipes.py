@@ -1,6 +1,7 @@
 # coding: utf-8
 import asyncio
 import os
+import typing
 
 
 class BasePipeReader:
@@ -9,9 +10,9 @@ class BasePipeReader:
     def __init__(self, fd: int, loop: asyncio.AbstractEventLoop=None):
         self._loop = loop or asyncio.get_event_loop()
         self._fd = fd
-        self._reader = asyncio.StreamReader(loop=self._loop)
+        self.reader = asyncio.StreamReader(loop=self._loop)
         self._proto = asyncio.StreamReaderProtocol(
-            self._reader, loop=self._loop)
+            self.reader, loop=self._loop)
         self._transport = None
 
     async def connect_fd(self):
@@ -21,13 +22,14 @@ class BasePipeReader:
         )
 
     def ready(self):
-        return not self._reader.at_eof()
+        return not self.reader.at_eof()
 
 
 class PipeProxy(BasePipeReader):
     """ Proxies STDOUT/STDERR from child processes to file descriptor."""
 
-    def __init__(self, fd: int, file=None, loop:asyncio.AbstractEventLoop=None):
+    def __init__(self, fd: int, file: typing.io.TextIO=None,
+                 loop: asyncio.AbstractEventLoop=None):
         """
         :param fd: pipe file descriptor
         :param file: file to write to
@@ -38,7 +40,7 @@ class PipeProxy(BasePipeReader):
 
     async def read_loop(self):
         while self.ready():
-            some_bytes = await self._reader.read(2 ** 16)
+            some_bytes = await self.reader.read(-1)
             self._file.write(some_bytes.decode('utf-8'))
             self._file.flush()
 
@@ -66,4 +68,4 @@ class KeepAlivePipe(BasePipeReader):
         return True
 
     async def read_pong(self):
-        await self._reader.read(1)
+        await self.reader.read(1)
