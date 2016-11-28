@@ -396,7 +396,11 @@ class Supervisor:
             self._wait_task.cancel()
 
     async def _check_pool(self):
-        # check if some worker processes are stale or exited
+        """ Checks if some worker processes are stale or exited.
+
+        Stale processes are killed, exited - restarted, if pool is still
+        running.
+        """
         for worker in list(self._pool.values()):
             if not worker.is_stale():
                 continue

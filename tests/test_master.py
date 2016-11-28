@@ -1,16 +1,11 @@
 # coding: utf-8
+import asyncio
 import signal
 from contextlib import ExitStack
 from random import randint
-
-import asyncio
 from unittest import mock
 
-import time
-
-from aioworkerpool import master
 from tests import base
-
 
 __all__ = ['SupervisorTestCase']
 
@@ -22,7 +17,7 @@ class SupervisorTestCase(base.TestCaseBase):
                                               check_interval=0.1)
         self.handler_patcher = mock.patch(
             'aioworkerpool.master.ChildHandler.start')
-        self.handler_start = self.handler_patcher.start()
+        self.start_mock = self.handler_patcher.start()
 
     def tearDown(self):
         super().tearDown()
@@ -210,3 +205,85 @@ class SupervisorTestCase(base.TestCaseBase):
         self.supervisor._running = True
         self.loop.call_later(0.1, lambda: self.supervisor._wait_task.cancel())
         await self.supervisor._run_forever_loop()
+
+    def _init_worker(self, stale=False, exists=True, worker_id=None, add=True):
+        if worker_id is None:
+            worker_id = 0
+        worker = mock.MagicMock()
+        worker.is_stale = lambda: stale
+        worker.child_exists = lambda: exists
+        worker.id = worker_id
+        if add:
+            self.supervisor._pool[worker.id] = worker
+            self.supervisor._workers = len(self.supervisor._pool)
+        return worker
+
+    @base.unittest_with_loop
+    async def test_check_loop_remove_exited(self):
+        self.supervisor._running = True
+        worker = self._init_worker(True, False)
+        with mock.patch.object(self.supervisor, 'start_worker') as start_mock:
+            await self.supervisor._check_pool()
+
+        start_mock.assert_called_once_with(worker.id)
+
+    @base.unittest_with_loop
+    async def test_check_loop_kill_stale(self):
+        self.supervisor._running = True
+        worker = self._init_worker(True, True)
+
+        def send_and_wait(_):
+            done_future = asyncio.Future(loop=self.loop)
+            done_future.set_result(None)
+            self.supervisor._pool.pop(worker.id)
+            return done_future
+
+        with mock.patch.object(self.supervisor, 'start_worker') as start_mock:
+            with mock.patch.object(worker, 'send_and_wait',
+                                   side_effect=send_and_wait) as kill_mock:
+                await self.supervisor._check_pool()
+
+        kill_mock.assert_called_once_with(signal.SIGKILL)
+        start_mock.assert_called_once_with(worker.id)
+
+    @base.unittest_with_loop
+    async def test_check_loop_alive_workers(self):
+        self.supervisor._running = True
+        # if worker.is_stale returns False, other checks are skipped
+        worker = self._init_worker(False, False)
+        done_future = asyncio.Future(loop=self.loop)
+        done_future.set_result(None)
+
+        with mock.patch.object(self.supervisor, 'start_worker') as start_mock:
+            with mock.patch.object(worker, 'send_and_wait',
+                                   return_value=done_future) as kill_mock:
+                await self.supervisor._check_pool()
+
+        self.assertDictEqual(self.supervisor._pool, {worker.id: worker})
+        self.assertFalse(kill_mock.called)
+        self.assertFalse(start_mock.called)
+
+    @base.unittest_with_loop
+    async def test_check_loop_not_running(self):
+        self.supervisor._running = False
+        worker = self._init_worker(True, False)
+        with mock.patch.object(self.supervisor, 'start_worker') as start_mock:
+            await self.supervisor._check_pool()
+
+        self.assertNotIn(worker.id, self.supervisor._pool)
+        self.assertFalse(start_mock.called)
+
+    @base.unittest_with_loop
+    async def test_check_loop_not_enough_workers(self):
+        self.supervisor._running = True
+        worker = self._init_worker(False, False, worker_id=2)
+        self.supervisor._workers = 3
+        with mock.patch.object(self.supervisor, 'start_worker') \
+                as start_mock:  # type: mock.MagicMock
+            await self.supervisor._check_pool()
+
+        self.assertIn(worker.id, self.supervisor._pool)
+        # worker started for missing IDs
+        self.assertEqual(start_mock.call_count, 2)
+        self.assertIn(mock.call(0), start_mock.call_args_list)
+        self.assertIn(mock.call(1), start_mock.call_args_list)
