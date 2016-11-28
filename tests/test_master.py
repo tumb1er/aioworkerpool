@@ -213,16 +213,15 @@ class SupervisorTestCase(base.TestCaseBase):
         self.loop.call_later(0.1, lambda: self.supervisor._wait_task.cancel())
         await self.supervisor._run_forever_loop()
 
-    def _init_worker(self, stale=False, exists=True, worker_id=None, add=True):
+    def _init_worker(self, stale=False, exists=True, worker_id=None):
         if worker_id is None:
             worker_id = 0
         worker = mock.MagicMock()
         worker.is_stale = lambda: stale
         worker.child_exists = lambda: exists
         worker.id = worker_id
-        if add:
-            self.supervisor._pool[worker.id] = worker
-            self.supervisor._workers = len(self.supervisor._pool)
+        self.supervisor._pool[worker.id] = worker
+        self.supervisor._workers = len(self.supervisor._pool)
         return worker
 
     @base.unittest_with_loop

@@ -59,9 +59,8 @@ class PipesTestCase(base.TestCaseBase):
         pipe = pipes.KeepAlivePipe(r_fd, loop=self.loop, timeout=0.2)
         await pipe.connect_fd()
 
-        def write():
-            file.write('b')
-
-        self.loop.call_later(0.3, write)
+        file.write('b')
+        # first iteration is ok, but second does not receive any ping data,
+        # thus is timeout-ed.
         result = await pipe.read_loop()
         self.assertFalse(result)
