@@ -1,5 +1,6 @@
 # coding: utf-8
 import asyncio
+import os
 import signal
 from contextlib import ExitStack
 from random import randint
@@ -14,7 +15,8 @@ class SupervisorTestCase(base.TestCaseBase):
     def setUp(self):
         super().setUp()
         self.supervisor = base.TestSupervisor(base.TestWorker, loop=self.loop,
-                                              check_interval=0.1)
+                                              check_interval=0.1,
+                                              stdout=None, stderr=None)
         self.handler_patcher = mock.patch(
             'aioworkerpool.master.ChildHandler.start')
         self.start_mock = self.handler_patcher.start()
@@ -287,3 +289,68 @@ class SupervisorTestCase(base.TestCaseBase):
         self.assertEqual(start_mock.call_count, 2)
         self.assertIn(mock.call(0), start_mock.call_args_list)
         self.assertIn(mock.call(1), start_mock.call_args_list)
+
+    def test_start_worker(self):
+        worker = self._init_worker()
+        with mock.patch.object(
+                self.supervisor, 'child_factory', return_value=worker) \
+            as cf_mock:  # type: mock.MagicMock
+            self.supervisor.start_worker(worker.id)
+
+        cf_mock.assert_called_once_with(worker.id, self.loop,
+                                        self.supervisor._worker_factory,
+                                        **self.supervisor._kwargs)
+        worker.start.assert_called_once_with()
+
+    def test_daemon_context(self):
+        lock_obj = object()
+        ctx_obj = object()
+        with mock.patch('aioworkerpool.master.TimeoutPIDLockFile',
+                        return_value=lock_obj) \
+                as lock_mock:  # type: mock.MagicMock
+            with mock.patch('aioworkerpool.master.DaemonContext',
+                            return_value=ctx_obj) \
+                    as dm_mock:  # type: mock.MagicMock
+                ctx = self.supervisor.get_daemon_context('pidfile.txt')
+
+        self.assertIs(ctx, ctx_obj)
+        dm_mock.assert_called_once_with(pidfile=lock_obj)
+        lock_mock.assert_called_once_with(
+            os.path.join(os.getcwd(), 'pidfile.txt'))
+
+    def test_main(self):
+        self.supervisor._loop = loop_mock = mock.MagicMock()
+        with mock.patch.object(self.supervisor, 'start') \
+            as start_mock:  # type: mock.MagicMock
+            self.supervisor.main()
+        start_mock.assert_called_once_with()
+        loop_mock.run_forever.assert_called_once_with()
+        loop_mock.close.assert_called_once_with()
+
+    def test_main_daemon(self):
+        lock_obj = object()
+        ctx_obj = mock.MagicMock()
+        with mock.patch('aioworkerpool.master.TimeoutPIDLockFile',
+                        return_value=lock_obj) \
+                as lock_mock:  # type: mock.MagicMock
+            with mock.patch('aioworkerpool.master.DaemonContext',
+                            return_value=ctx_obj) \
+                    as dm_mock:  # type: mock.MagicMock
+                with mock.patch.object(self.supervisor, '_main') \
+                        as start_mock:  # type: mock.MagicMock
+                    self.supervisor.main(daemonize=True, pidfile='pid.txt')
+
+        dm_mock.assert_called_once_with(pidfile=lock_obj)
+        ctx_obj.__enter__.assert_called_once_with()
+        start_mock.assert_called_once_with()
+        ctx_obj.__exit__.assert_called_once_with(None, None, None)
+
+    def test_main_no_daemon(self):
+        with mock.patch.object(self.supervisor, 'get_daemon_context') \
+                as ctx_mock:  # type: mock.MagicMock
+            with mock.patch.object(self.supervisor, '_main') \
+                    as start_mock:  # type: mock.MagicMock
+                self.supervisor.main(daemonize=False)
+
+        start_mock.assert_called_once_with()
+        self.assertFalse(ctx_mock.called)
