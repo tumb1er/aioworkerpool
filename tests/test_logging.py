@@ -10,8 +10,10 @@ from aioworkerpool.logging import PickleStreamHandler, PicklePipeReader
 from tests import base
 
 
-class LoggingTestCase(base.TestCaseBase):
+__all__ = ['LoggingTestCase']
 
+
+class LoggingTestCase(base.TestCaseBase):
 
     def tearDown(self):
         super().tearDown()
@@ -27,7 +29,7 @@ class LoggingTestCase(base.TestCaseBase):
         with mock.patch.object(logger, 'handle') as handle_mock:
             try:
                 raise RuntimeError("Test exception")
-            except Exception:
+            except RuntimeError:
                 logger.exception("Test exception handling")
 
         record = handle_mock.call_args[0][0]
@@ -68,5 +70,3 @@ class LoggingTestCase(base.TestCaseBase):
             await log_reader.read_loop()
 
         self.assertFalse(handle_mock.called)
-
-
