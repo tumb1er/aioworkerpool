@@ -1,8 +1,23 @@
+import codecs
+import os
+import re
 from distutils.core import setup
+
+
+version = '0.0.0'  # stub for lint
+
+with codecs.open(os.path.join(os.path.abspath(os.path.dirname(
+        __file__)), 'aiohttp', '__init__.py'), 'r', 'latin1') as fp:
+    try:
+        version = re.findall(r"^__version__ = '([^']+)'\r?$",
+                             fp.read(), re.M)[0]
+    except IndexError:
+        raise RuntimeError('Unable to determine version.')
+
 
 setup(
     name='aioworkerpool',
-    version='0.1',
+    version=version,
     packages=['aioworkerpool'],
     url='https://github.com/tumb1er/aioworkerpool',
     license='Beer license',
