@@ -507,5 +507,300 @@ class ChildHandlerTestCase(base.TestCaseBase):
         fdopen_mock.assert_called_once_with(fds[7], 'w')  # w_keepalive
         self.assertIs(self.handler._pong_stream, fd_obj)
 
+    def test_init_worker_logging(self):
+        fd_obj = object()
+        handler = mock.MagicMock()
+        logger = mock.MagicMock()
+        with ExitStack() as stack:
+            fdopen_mock = stack.enter_context(
+                mock.patch('os.fdopen', return_value=fd_obj))
+            handler_mock = stack.enter_context(
+                mock.patch('aioworkerpool.master.PickleStreamHandler',
+                           return_value=handler))
+            stack.enter_context(
+                mock.patch('aioworkerpool.master.getLogger',
+                           return_value=logger))
+            root_mock = stack.enter_context(
+                mock.patch('logging.root.addHandler'))
+            self.handler.init_worker_logging(3)
+        fdopen_mock.assert_called_once_with(3, 'w')
+        handler_mock.assert_called_once_with(fd_obj)
+        self.assertFalse(logger.propagate)
+        logger.addHandler.assert_called_once_with(handler)
+        root_mock.assert_called_once_with(handler)
+
+    def test_start_as_parent(self):
+        done_future = asyncio.Future(loop=self.loop)
+        done_future.set_result(None)
+        with ExitStack() as stack:
+            fork_mock = stack.enter_context(mock.patch.object(
+                self.handler, 'fork', return_value=True))
+            child_handler_mock = stack.enter_context(mock.patch.object(
+                self.handler, '_add_child_handler', return_value=done_future))
+            task_mock = stack.enter_context(mock.patch('asyncio.Task'))
+            cleanup_parent_mock = stack.enter_context(mock.patch.object(
+                self.handler, '_cleanup_parent_loop'))
+            main_mock = stack.enter_context(mock.patch.object(
+                self.handler, '_main'))
+            self.handler.start()
+
+        fork_mock.assert_called_once_with()
+        child_handler_mock.assert_called_once_with()
+        task_mock.assert_called_once_with(done_future, loop=self.loop)
+
+        self.assertFalse(cleanup_parent_mock.called)
+        self.assertFalse(main_mock.called)
+
+    def test_start_as_child(self):
+        done_future = asyncio.Future(loop=self.loop)
+        done_future.set_result(None)
+        with ExitStack() as stack:
+            fork_mock = stack.enter_context(mock.patch.object(
+                self.handler, 'fork', return_value=False))
+            child_handler_mock = stack.enter_context(mock.patch.object(
+                self.handler, '_add_child_handler', return_value=done_future))
+            task_mock = stack.enter_context(mock.patch('asyncio.Task'))
+            cleanup_parent_mock = stack.enter_context(mock.patch.object(
+                self.handler, '_cleanup_parent_loop'))
+            main_mock = stack.enter_context(mock.patch.object(
+                self.handler, '_main'))
+            self.handler.start()
+
+        fork_mock.assert_called_once_with()
+        self.assertFalse(child_handler_mock.called)
+        self.assertFalse(task_mock.called)
+
+        cleanup_parent_mock.assert_called_once_with()
+        main_mock.assert_called_once_with()
+
+    @base.unittest_with_loop
+    async def test_add_child_handler(self):
+        fs = []
+        for _ in range(4):
+            done_future = asyncio.Future(loop=self.loop)
+            done_future.set_result(None)
+            fs.append(done_future)
+
+        done_future = asyncio.Future(loop=self.loop)
+        done_future.set_result(None)
+
+        task_objs = [mock.MagicMock() for _ in range(4)]
+
+        self.handler._stdout_pipe = pipes.PipeProxy(1, loop=self.loop)
+        self.handler._stderr_pipe = pipes.PipeProxy(2, loop=self.loop)
+        self.handler._logging_pipe = PicklePipeReader(3, loop=self.loop)
+        self.handler._keepalive_pipe = pipes.KeepAlivePipe(4, loop=self.loop)
+
+        with ExitStack() as stack:
+            add_child_handler_mock = stack.enter_context(
+                mock.patch.object(asyncio.get_child_watcher(),
+                                  'add_child_handler'))
+            connect_fd_mock = stack.enter_context(
+                mock.patch('aioworkerpool.pipes.BasePipeReader.connect_fd',
+                           return_value=done_future))
+            proxy_read_loop_mock = stack.enter_context(
+                mock.patch('aioworkerpool.pipes.PipeProxy.read_loop',
+                           side_effect=[fs[0], fs[1]]))
+            logging_read_loop_mock = stack.enter_context(
+                mock.patch('aioworkerpool.logging.PicklePipeReader.read_loop',
+                           return_value=fs[2]))
+            keepalive_loop_mock = stack.enter_context(
+                mock.patch('aioworkerpool.pipes.KeepAlivePipe.read_loop',
+                           return_value=fs[3]))
+            task_mock = stack.enter_context(
+                mock.patch('asyncio.Task', side_effect=task_objs))
+            self.handler.fork()
+            await self.handler._add_child_handler()
+
+        # added asyncio ChildWatcher
+        add_child_handler_mock.assert_called_once_with(
+            self.handler._child_pid, self.handler.on_child_exit)
+
+        # all pipe readers connected
+        connect_calls = [mock.call() for _ in range(4)]
+        self.assertListEqual(connect_fd_mock.call_args_list, connect_calls)
+
+        # all read loops started
+        proxy_read_calls = [mock.call(), mock.call()]
+
+        self.assertListEqual(proxy_read_loop_mock.call_args_list,
+                             proxy_read_calls)
+
+        logging_read_loop_mock.assert_called_once_with()
+        keepalive_loop_mock.assert_called_once_with()
+
+        # all read_loops are scheduled as tasks
+        task_calls = [mock.call(f, loop=self.loop) for f in fs]
+        self.assertListEqual(task_mock.call_args_list, task_calls)
+
+        # certain tasks are saved correctly
+        self.assertIs(self.handler._logging_task, task_objs[2])
+        self.assertIs(self.handler._keepalive_task, task_objs[3])
+
+        # keep_alive task has mark_stale callback
+        task_objs[3].add_done_callback.assert_called_once_with(
+            self.handler._mark_stale)
+
+    @base.unittest_with_loop
+    async def test_add_child_handler_exception(self):
+        with mock.patch('asyncio.get_child_watcher',
+                        side_effect=RuntimeError("WTF")):
+            await self.handler._add_child_handler()
+
+    def test_on_child_exit(self):
+        exit_code = randint(1, 10)
+        self.handler._child_pid = pid = randint(1, 10)
+        self.handler._logging_task = logging_mock = mock.MagicMock()
+        self.handler._keepalive_task = keepalive_mock = mock.MagicMock()
+
+        self.handler.on_child_exit(pid, exit_code)
+
+        self.assertTrue(self.handler._exit_future.done())
+        logging_mock.cancel.assert_called_once_with()
+        keepalive_mock.cancel.assert_called_once_with()
+        self.assertEqual(self.handler._child_exit_code, exit_code)
+        self.assertIsNone(self.handler._child_pid)
+
+    def test_on_child_exit_no_tasks(self):
+        exit_code = randint(1, 10)
+        self.handler._child_pid = pid = randint(1, 10)
+        self.handler._logging_task = None
+        self.handler._keepalive_task = None
+
+        self.handler.on_child_exit(pid, exit_code)
+
+        self.assertTrue(self.handler._exit_future.done())
+        self.assertEqual(self.handler._child_exit_code, exit_code)
+        self.assertIsNone(self.handler._child_pid)
+
+    def test_mark_stale_cancelled(self):
+        done_future = asyncio.Future(loop=self.loop)
+        done_future.cancel()
+        self.handler._alive = True
+        self.handler._mark_stale(done_future)
+        self.assertTrue(self.handler._alive)
+
+    def test_mark_stale_closed(self):
+        done_future = asyncio.Future(loop=self.loop)
+        done_future.set_result(True)
+        self.handler._alive = True
+        self.handler._mark_stale(done_future)
+        self.assertTrue(self.handler._alive)
+
+    def test_mark_stale_timeouted(self):
+        done_future = asyncio.Future(loop=self.loop)
+        done_future.set_result(False)
+        self.handler._alive = True
+        self.handler._mark_stale(done_future)
+        self.assertFalse(self.handler._alive)
+
+    def test_cleanup_parent_loop(self):
+        self.handler._loop = loop = mock.MagicMock()
+        self.handler._preserve_fds = preserve_fds = (4, 6)
+        self.handler._max_fd = max_fd = 8
+        with mock.patch('os.close') as close_mock:
+            self.handler._cleanup_parent_loop()
+
+        remove_signal_calls = [
+            mock.call(signal.SIGINT),
+            mock.call(signal.SIGTERM),
+        ]
+        self.assertListEqual(loop.remove_signal_handler.call_args_list,
+                             remove_signal_calls)
+
+        loop.stop.assert_called_once_with()
+
+        closed_fds = set(range(3, max_fd)) - set(preserve_fds)
+        close_calls = [mock.call(f) for f in closed_fds]
+        self.assertEqual(close_mock.call_count, len(closed_fds))
+        for c in close_calls:
+            self.assertIn(c, close_mock.call_args_list)
+
+    def test_main(self):
+        done_future = asyncio.Future(loop=self.loop)
+        done_future.set_result(None)
+        loop = mock.MagicMock()
+        worker = mock.MagicMock()
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch('asyncio.new_event_loop',
+                                           return_value=loop))
+            set_loop_mock = stack.enter_context(
+                mock.patch('asyncio.set_event_loop'))
+            task_mock = stack.enter_context(mock.patch('asyncio.Task'))
+            init_mock = stack.enter_context(
+                mock.patch.object(self.handler, 'init_worker',
+                                  return_value=worker))
+            exit_mock = stack.enter_context(mock.patch('sys.exit'))
+
+            pong_loop = stack.enter_context(
+                mock.patch.object(self.handler, '_pong_loop',
+                                  return_value=done_future))
+
+            self.handler._main()
+
+        set_loop_mock.assert_called_once_with(loop)
+        for call in [
+            mock.call(signal.SIGINT, worker.interrupt),
+            mock.call(signal.SIGTERM, worker.terminate),
+        ]:
+            self.assertIn(call, loop.add_signal_handler.call_args_list)
+        init_mock.assert_called_once_with()
+        pong_loop.assert_called_once_with()
+        task_mock.assert_called_once_with(done_future, loop=loop)
+        worker.start.assert_called_once_with()
+        exit_mock.assert_called_once_with(0)
+
+    def test_init_worker(self):
+        with mock.patch.object(self.handler, '_worker_factory') as init_mock:
+            self.handler.init_worker()
+
+        init_mock.assert_called_once_with(self.worker_id, self.loop)
+
+    def test_send_and_wait_no_child_pid(self):
+        sig = randint(1, 10)
+        f = self.handler.send_and_wait(sig)
+        self.assertIs(f, self.handler._exit_future)
+
+    def test_send_and_wait(self):
+        sig = randint(1, 10)
+        self.handler._child_pid = pid = randint(10000, 20000)
+        with mock.patch('os.kill') as kill_mock:
+            f = self.handler.send_and_wait(sig)
+        self.assertIs(f, self.handler._exit_future)
+        kill_mock.assert_called_once_with(pid, sig)
+
+    def test_send_and_wait_no_child_process(self):
+        sig = randint(1, 10)
+        self.handler._child_pid = pid = randint(10000, 20000)
+        with mock.patch('os.kill',
+                        side_effect=OSError("[Errno 3] No such process")):
+            f = self.handler.send_and_wait(sig)
+        self.assertIs(f, self.handler._exit_future)
+
+    @base.unittest_with_loop
+    async def test_pong_loop(self):
+        done_future = asyncio.Future(loop=self.loop)
+        done_future.set_result(None)
+
+        with ExitStack() as stack:
+            stack.enter_context(self.assertRaises(RuntimeError))
+            sleep_mock = stack.enter_context(
+                mock.patch('asyncio.sleep',
+                            side_effect=[done_future, RuntimeError("stop")]))
+            self.handler._pong_stream = pong = mock.MagicMock()
+
+            await self.handler._pong_loop()
+
+        timeout = self.handler._worker_timeout / 2.0
+        sleep_calls = [mock.call(timeout, loop=self.loop)] * 2
+        self.assertListEqual(sleep_calls, sleep_mock.call_args_list)
+
+        pong.write.assert_called_once_with('p')
+        pong.flush.assert_called_once_with()
+
+
+
+
+
 
 

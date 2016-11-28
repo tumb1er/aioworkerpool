@@ -172,11 +172,14 @@ class ChildHandler:
                 self._keepalive_pipe.connect_fd(),
                 loop=self._loop)
 
-            asyncio.Task(self._stdout_pipe.read_loop())
-            asyncio.Task(self._stderr_pipe.read_loop())
-            self._logging_task = asyncio.Task(self._logging_pipe.read_loop())
+            asyncio.Task(self._stdout_pipe.read_loop(), loop=self._loop)
+            asyncio.Task(self._stderr_pipe.read_loop(), loop=self._loop)
+
+            self._logging_task = asyncio.Task(
+                self._logging_pipe.read_loop(), loop=self._loop)
+
             self._keepalive_task = asyncio.Task(
-                self._keepalive_pipe.read_loop())
+                self._keepalive_pipe.read_loop(), loop=self._loop)
             self._keepalive_task.add_done_callback(self._mark_stale)
             self.logger.debug("Started child %s" % self._child_pid)
         except Exception:
@@ -256,7 +259,7 @@ class ChildHandler:
         self.logger.debug("Sending signal %s to %s" % (sig, self._child_pid))
         try:
             os.kill(self._child_pid, sig)
-        except IOError:
+        except OSError:
             pass
         return self._exit_future
 
