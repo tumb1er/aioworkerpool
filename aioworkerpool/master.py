@@ -469,6 +469,22 @@ class Supervisor:
         self._pool[worker_id] = None
         self.reset_check_interval()
 
+    def remove_worker(self, worker_id: int,
+                      sig: int=signal.SIGTERM) -> asyncio.Future:
+        """ Stops and removes worker with id.
+
+        :param worker_id: worker id to remove
+        :param sig: signal to send to child process
+        :raises KeyError: if id does not exist.
+        :returns: future that happens when child process exits.
+        """
+        worker = self._pool.pop(worker_id)
+        if worker is None:
+            f = asyncio.Future(loop=self.loop)
+            f.set_result(None)
+            return f
+        return worker.send_and_wait(sig)
+
     def main(self, daemonize=False, pidfile='aioworkerpool.pid'):
         """ Supervisor entry point.
 

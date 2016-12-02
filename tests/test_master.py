@@ -193,6 +193,29 @@ class SupervisorTestCase(base.TestCaseBase):
             # can't add same worker id twice
             self.supervisor.add_worker(worker_id)
 
+    def test_remove_worker(self):
+        worker = self._init_worker(True, False, worker_id=1)
+
+        worker_id = self.supervisor._workers + 1
+        with self.assertRaises(KeyError):
+            self.supervisor.remove_worker(worker_id)
+
+        worker_id = 0  # not started
+        exit_future = object()
+        with mock.patch.object(worker, 'send_and_wait',
+                               return_value=exit_future) as kill_mock:
+            f = self.supervisor.remove_worker(worker_id)
+            self.assertIsInstance(f, asyncio.Future)
+            self.assertIsNone(f.result())
+            self.assertFalse(kill_mock.called)
+
+        worker_id = 1
+        with mock.patch.object(worker, 'send_and_wait',
+                               return_value=exit_future) as kill_mock:
+            f = self.supervisor.remove_worker(worker_id, sig=signal.SIGKILL)
+            self.assertIs(f, exit_future)
+            kill_mock.assert_called_once_with(signal.SIGKILL)
+
     def test_reset_check_interval(self):
         self.assertIsNone(self.supervisor._wait_task)
         self.supervisor.reset_check_interval()
