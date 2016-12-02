@@ -8,6 +8,7 @@ import time
 import typing
 from logging import getLogger
 
+import collections
 from daemon import DaemonContext
 from daemon.pidfile import TimeoutPIDLockFile
 
@@ -283,7 +284,7 @@ class Supervisor:
 
     def __init__(self, worker_factory: WorkerFactory,
                  loop: asyncio.AbstractEventLoop = None,
-                 workers: typing.Union[int, typing.Sized] = 2,
+                 workers: typing.Union[int, collections.Iterable] = 2,
                  check_interval: float = 1.0,
                  **kwargs):
         """
@@ -306,11 +307,15 @@ class Supervisor:
         if isinstance(workers, int):
             self._workers = workers
             self._pool = {i: None for i in range(workers)}
-        elif hasattr(workers, '__len__'):
-            self._workers = len(workers)
+        elif isinstance(workers, collections.Iterable):
+            self._pool = {}
             for i in workers:
                 assert isinstance(i, int)
-            self._pool = {i: None for i in workers}
+                self._pool[i] = None
+            self._workers = len(self._pool)
+
+        else:
+            raise ValueError("workers must be int or iterable")
         self._on_start = Signal()
         self._on_shutdown = Signal()
         self._last_check = 0

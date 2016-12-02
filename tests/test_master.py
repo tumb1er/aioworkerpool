@@ -46,10 +46,15 @@ class SupervisorTestCase(base.TestCaseBase):
         self.assertIn(s.shutdown_cb, s._on_shutdown._callbacks)
 
     def test_init_custom_worker_ids(self):
+        with self.assertRaises(ValueError):
+            # only int or enumerable allowed for workers argument
+            base.TestSupervisor(base.TestWorker, loop=self.loop,
+                                workers=object())
+
         workers = {randint(0, 10) for _ in range(10)}
-        interval = randint(0, 10)
+
         s = base.TestSupervisor(base.TestWorker, loop=self.loop,
-                                workers=workers)
+                                workers=iter(workers))
         self.assertEqual(s._workers, len(workers))
         self.assertSetEqual(set(s._pool.keys()), workers)
 
