@@ -148,7 +148,7 @@ class ChildHandler:
             # add event loop round-trip to ensure that child has started
             asyncio.Task(self._add_child_handler(), loop=self._loop)
         else:
-            self._cleanup_parent_loop()
+            self.cleanup_parent_loop()
             # start worker event loop
             self._main()
 
@@ -216,8 +216,11 @@ class ChildHandler:
         self.logger.warning("Marking %s as stale" % self._child_pid)
         self._alive = False
 
-    def _cleanup_parent_loop(self):
-        """ Cleans parent event loop in child process."""
+    def cleanup_parent_loop(self):
+        """ Cleanups and stops parent event loop in child process.
+
+        Closes file descriptors not listed in preserved_fds.
+        """
         self.logger.debug("Cleanup parent loop")
         # remove signal handlers from parent event loop
         self._loop.remove_signal_handler(signal.SIGINT)

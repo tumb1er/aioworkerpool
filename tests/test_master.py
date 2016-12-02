@@ -594,7 +594,7 @@ class ChildHandlerTestCase(base.TestCaseBase):
                 self.handler, '_add_child_handler', return_value=done_future))
             task_mock = stack.enter_context(mock.patch('asyncio.Task'))
             cleanup_parent_mock = stack.enter_context(mock.patch.object(
-                self.handler, '_cleanup_parent_loop'))
+                self.handler, 'cleanup_parent_loop'))
             main_mock = stack.enter_context(mock.patch.object(
                 self.handler, '_main'))
             self.handler.start()
@@ -616,7 +616,7 @@ class ChildHandlerTestCase(base.TestCaseBase):
                 self.handler, '_add_child_handler', return_value=done_future))
             task_mock = stack.enter_context(mock.patch('asyncio.Task'))
             cleanup_parent_mock = stack.enter_context(mock.patch.object(
-                self.handler, '_cleanup_parent_loop'))
+                self.handler, 'cleanup_parent_loop'))
             main_mock = stack.enter_context(mock.patch.object(
                 self.handler, '_main'))
             self.handler.start()
@@ -754,7 +754,7 @@ class ChildHandlerTestCase(base.TestCaseBase):
         self.handler._preserve_fds = preserve_fds = (4, 6)
         self.handler._max_fd = max_fd = 8
         with mock.patch('os.close') as close_mock:
-            self.handler._cleanup_parent_loop()
+            self.handler.cleanup_parent_loop()
 
         remove_signal_calls = [
             mock.call(signal.SIGINT),
