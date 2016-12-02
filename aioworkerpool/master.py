@@ -400,7 +400,7 @@ class Supervisor:
 
     async def _run_forever_loop(self):
         while self._running:
-            self.logger.debug("check pool %s")
+            self.logger.debug("checking pool")
             await self._check_pool()
             now = time.time()
             interval = min(now - self._last_check, self._check_interval)
