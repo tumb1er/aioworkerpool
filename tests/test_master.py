@@ -45,6 +45,14 @@ class SupervisorTestCase(base.TestCaseBase):
         self.assertIn(s.start_cb, s._on_start._callbacks)
         self.assertIn(s.shutdown_cb, s._on_shutdown._callbacks)
 
+    def test_init_custom_worker_ids(self):
+        workers = {randint(0, 10) for _ in range(10)}
+        interval = randint(0, 10)
+        s = base.TestSupervisor(base.TestWorker, loop=self.loop,
+                                workers=workers)
+        self.assertEqual(s._workers, len(workers))
+        self.assertSetEqual(set(s._pool.keys()), workers)
+
     def test_start(self):
         run_coro = object()
         check_task = object()
@@ -168,6 +176,18 @@ class SupervisorTestCase(base.TestCaseBase):
 
         check_mock.assert_called_once_with()
 
+    def test_add_worker(self):
+        worker_id = self.supervisor._workers + 1
+        with mock.patch.object(
+                self.supervisor, 'reset_check_interval') as reset_mock:
+            self.supervisor.add_worker(worker_id)
+        self.assertIsNone(self.supervisor._pool[worker_id])
+        reset_mock.assert_called_once_with()
+
+        with self.assertRaises(ValueError):
+            # can't add same worker id twice
+            self.supervisor.add_worker(worker_id)
+
     def test_reset_check_interval(self):
         self.assertIsNone(self.supervisor._wait_task)
         self.supervisor.reset_check_interval()
@@ -227,7 +247,9 @@ class SupervisorTestCase(base.TestCaseBase):
     @base.unittest_with_loop
     async def test_check_loop_remove_exited(self):
         self.supervisor._running = True
-        worker = self._init_worker(True, False)
+        worker = self._init_worker(True, False, worker_id=1)
+        # remove redundant worker
+        del self.supervisor._pool[0]
         with mock.patch.object(self.supervisor, 'start_worker') as start_mock:
             await self.supervisor._check_pool()
 
@@ -236,12 +258,14 @@ class SupervisorTestCase(base.TestCaseBase):
     @base.unittest_with_loop
     async def test_check_loop_kill_stale(self):
         self.supervisor._running = True
-        worker = self._init_worker(True, True)
+        worker = self._init_worker(True, True, worker_id=1)
+        # remove redundant worker
+        del self.supervisor._pool[0]
 
         def send_and_wait(_):
             done_future = asyncio.Future(loop=self.loop)
             done_future.set_result(None)
-            self.supervisor._pool.pop(worker.id)
+            self.supervisor._pool[worker.id] = None
             return done_future
 
         with mock.patch.object(self.supervisor, 'start_worker') as start_mock:
@@ -256,7 +280,7 @@ class SupervisorTestCase(base.TestCaseBase):
     async def test_check_loop_alive_workers(self):
         self.supervisor._running = True
         # if worker.is_stale returns False, other checks are skipped
-        worker = self._init_worker(False, False)
+        worker = self._init_worker(False, False, worker_id=1)
         done_future = asyncio.Future(loop=self.loop)
         done_future.set_result(None)
 
@@ -265,18 +289,22 @@ class SupervisorTestCase(base.TestCaseBase):
                                    return_value=done_future) as kill_mock:
                 await self.supervisor._check_pool()
 
-        self.assertDictEqual(self.supervisor._pool, {worker.id: worker})
+        self.assertDictEqual(self.supervisor._pool,
+                             {worker.id: worker, 0: None})
         self.assertFalse(kill_mock.called)
-        self.assertFalse(start_mock.called)
+        # Worker with id=0 is trying to start
+        self.assertTrue(start_mock.called)
 
     @base.unittest_with_loop
     async def test_check_loop_not_running(self):
         self.supervisor._running = False
-        worker = self._init_worker(True, False)
+        worker = self._init_worker(True, False, worker_id=1)
+        # remove redundant worker
+        del self.supervisor._pool[0]
         with mock.patch.object(self.supervisor, 'start_worker') as start_mock:
             await self.supervisor._check_pool()
 
-        self.assertNotIn(worker.id, self.supervisor._pool)
+        self.assertIsNone(self.supervisor._pool[worker.id])
         self.assertFalse(start_mock.called)
 
     @base.unittest_with_loop

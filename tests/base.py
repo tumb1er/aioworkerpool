@@ -67,7 +67,8 @@ class TestSupervisor(master.Supervisor):
         self.shutdown_cb_called = True
 
     async def _check_pool(self):
-        await super()._check_pool()
+        alive = await super()._check_pool()
         self._running = False
+        return alive
 
 

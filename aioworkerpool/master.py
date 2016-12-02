@@ -282,7 +282,8 @@ class Supervisor:
     child_factory = ChildHandler
 
     def __init__(self, worker_factory: WorkerFactory,
-                 loop: asyncio.AbstractEventLoop = None, workers: int = 2,
+                 loop: asyncio.AbstractEventLoop = None,
+                 workers: typing.Union[int, typing.Sized] = 2,
                  check_interval: float = 1.0,
                  **kwargs):
         """
@@ -290,18 +291,26 @@ class Supervisor:
         :param worker_factory:
         :param loop: asyncio event loop instance
         :param workers: number of child processes to start
+            (or a list of worker ids)
         :param check_interval: periodic pool check interval in seconds
         :param kwargs: keyword arguments passed
         """
         self._kwargs = kwargs
         self._loop = loop or asyncio.get_event_loop()
-        self._workers = workers
         self._worker_factory = worker_factory
         self._check_interval = check_interval
 
         self._check_task = None  # type: asyncio.Task
         self._wait_task = None   # type: asyncio.Task
-        self._pool = dict()      # type: typing.Dict[int, ChildHandler]
+
+        if isinstance(workers, int):
+            self._workers = workers
+            self._pool = {i: None for i in range(workers)}
+        elif hasattr(workers, '__len__'):
+            self._workers = len(workers)
+            for i in workers:
+                assert isinstance(i, int)
+            self._pool = {i: None for i in workers}
         self._on_start = Signal()
         self._on_shutdown = Signal()
         self._last_check = 0
@@ -376,7 +385,7 @@ class Supervisor:
 
     async def _stop_workers(self, sig):
         futures = []
-        for worker in self._pool.values():
+        for worker in filter(None, self._pool.values()):
             futures.append(worker.send_and_wait(sig))
         await asyncio.gather(*futures, loop=self._loop,
                              return_exceptions=True)
@@ -399,29 +408,39 @@ class Supervisor:
         if self._wait_task:
             self._wait_task.cancel()
 
-    async def _check_pool(self):
+    async def _check_pool(self) -> int:
         """ Checks if some worker processes are stale or exited.
 
         Stale processes are killed, exited - restarted, if pool is still
         running.
+
+        :returns: number of alive workers
         """
+        alive = 0
         for worker in list(self._pool.values()):
+            if worker is None:
+                continue
             if not worker.is_stale():
+                alive += 1
                 continue
             if not worker.child_exists():
                 self.logger.warning("Removing worker %s because exited" %
                                     worker)
-                self._pool.pop(worker.id)
+                self._pool[worker.id] = None
             else:
                 self.logger.warning("Removing stale worker %s" % worker)
                 await worker.send_and_wait(signal.SIGKILL)
 
-        self.logger.debug("%s workers in pool" % len(self._pool))
+        self.logger.debug("%s alive workers in pool" % alive)
 
         if not self._running:
-            return
-        for worker_id in set(range(self._workers)) - set(self._pool.keys()):
-            self.start_worker(worker_id)
+            return alive
+
+        for worker_id, handler in self._pool.items():
+            if handler is None:
+                self.start_worker(worker_id)
+                alive += 1
+        return alive
 
     def start_worker(self, worker_id: int):
         """ Starts a new worker for id.
@@ -432,6 +451,18 @@ class Supervisor:
             worker_id, self._loop, self._worker_factory, **self._kwargs)
         self._pool[worker_id] = worker
         worker.start()
+
+    def add_worker(self, worker_id: int):
+        """ Adds a worker with new id and schedules worker startup.
+
+        :raises ValueError: if worker already exists
+        """
+        if worker_id in self._pool:
+            raise ValueError(
+                "Worker with id %s is already in pool" % worker_id)
+
+        self._pool[worker_id] = None
+        self.reset_check_interval()
 
     def main(self, daemonize=False, pidfile='aioworkerpool.pid'):
         """ Supervisor entry point.
