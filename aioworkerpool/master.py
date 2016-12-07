@@ -231,7 +231,11 @@ class ChildHandler:
         # STDIN, STDOUT, STDERR instead of trying to close only
         # event loop selector descriptor.
         for fd in set(range(3, self._max_fd)) - set(self._preserve_fds):
-            os.close(fd)
+            try:
+                # not every integer in range is a valid file descriptor
+                os.close(fd)
+            except IOError:
+                pass
 
     def _main(self):
         """ Initializes and starts worker loop."""
