@@ -27,8 +27,8 @@ class ChildHandler:
     logger = getLogger("aioworkerpool.Handler")
 
     def __init__(self, worker_id: int, loop: asyncio.AbstractEventLoop,
-                 worker_factory:  WorkerFactory, stdout=sys.stdout,
-                 stderr=sys.stderr, worker_timeout=15.0,
+                 worker_factory:  WorkerFactory, *,
+                 stdout=sys.stdout, stderr=sys.stderr, worker_timeout=15.0,
                  preserve_fds: typing.Iterable[int]=()):
         """
         :param worker_id: id of created worker
@@ -285,7 +285,7 @@ class Supervisor:
 
     child_factory = ChildHandler
 
-    def __init__(self, worker_factory: WorkerFactory,
+    def __init__(self, worker_factory: WorkerFactory, *,
                  loop: asyncio.AbstractEventLoop = None,
                  workers: typing.Union[int, collections.Iterable] = 2,
                  check_interval: float = 1.0,
