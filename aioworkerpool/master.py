@@ -407,14 +407,15 @@ class Supervisor:
             self.logger.debug("checking pool")
             await self._check_pool()
             now = time.time()
-            interval = min(now - self._last_check, self._check_interval)
-            coro = asyncio.sleep(interval, loop=self._loop)
+            duration = now - self._last_check
+            sleep = max(self._check_interval - duration, 0)
+            coro = asyncio.sleep(sleep, loop=self._loop)
             self._wait_task = asyncio.Task(coro, loop=self._loop)
             try:
                 await self._wait_task
             except asyncio.CancelledError:
                 pass
-            self._last_check = now
+            self._last_check = time.time()
 
     def reset_check_interval(self):
         if self._wait_task:
