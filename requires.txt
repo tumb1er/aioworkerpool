@@ -1,2 +1,2 @@
 python-daemon
-tblib
+tblib==1.3.1
